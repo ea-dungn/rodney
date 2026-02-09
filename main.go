@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,9 @@ import (
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 )
+
+//go:embed help.txt
+var helpText string
 
 var version = "dev"
 
@@ -95,61 +99,8 @@ func getActivePage(browser *rod.Browser, s *State) (*rod.Page, error) {
 	return pages[idx], nil
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `rodney - Chrome automation from the command line
-
-Browser lifecycle:
-  rodney start                    Launch headless Chrome
-  rodney stop                     Shut down Chrome
-  rodney status                   Show browser status
-
-Navigation:
-  rodney open <url>               Navigate to URL
-  rodney back                     Go back in history
-  rodney forward                  Go forward in history
-  rodney reload                   Reload current page
-
-Page info:
-  rodney url                      Print current URL
-  rodney title                    Print page title
-  rodney html [selector]          Print HTML (page or element)
-  rodney text <selector>          Print text content of element
-  rodney attr <selector> <name>   Print attribute value
-  rodney pdf [file]               Save page as PDF
-
-Interaction:
-  rodney js <expression>          Evaluate JavaScript expression
-  rodney click <selector>         Click an element
-  rodney input <selector> <text>  Type text into an input field
-  rodney clear <selector>         Clear an input field
-  rodney select <selector> <val>  Select dropdown option by value
-  rodney submit <selector>        Submit a form
-  rodney hover <selector>         Hover over an element
-  rodney focus <selector>         Focus an element
-
-Waiting:
-  rodney wait <selector>          Wait for element to appear
-  rodney waitload                 Wait for page load
-  rodney waitstable               Wait for DOM to stabilize
-  rodney waitidle                 Wait for network idle
-  rodney sleep <seconds>          Sleep for N seconds
-
-Screenshots:
-  rodney screenshot [-w N] [-h N] [file]  Take page screenshot
-  rodney screenshot-el <sel> [f]  Screenshot an element
-
-Tabs:
-  rodney pages                    List all pages/tabs
-  rodney page <index>             Switch to page by index
-  rodney newpage [url]            Open a new page/tab
-  rodney closepage [index]        Close a page/tab
-
-Element queries:
-  rodney exists <selector>        Check if element exists (exit 0/1)
-  rodney count <selector>         Count matching elements
-  rodney visible <selector>       Check if element is visible (exit 0/1)
-`)
-	os.Exit(1)
+func printUsage() {
+	fmt.Print(helpText)
 }
 
 func fatal(format string, args ...interface{}) {
@@ -159,7 +110,8 @@ func fatal(format string, args ...interface{}) {
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		printUsage()
+		os.Exit(1)
 	}
 
 	cmd := os.Args[1]
@@ -244,10 +196,12 @@ func main() {
 	case "visible":
 		cmdVisible(args)
 	case "help", "-h", "--help":
-		usage()
+		printUsage()
+		os.Exit(0)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		usage()
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
+		printUsage()
+		os.Exit(1)
 	}
 }
 
