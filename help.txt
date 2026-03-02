@@ -92,7 +92,7 @@ PERFORMANCE:
   perf trace <secs> [file]        Record browser trace (outputs JSON for Perfetto)
 
 REACT PROFILING:
-  react hook                      Install React DevTools hook (before open!)
+  react hook                      Install React DevTools hook (persists across navigations)
   react tree [--json]             Show React component tree
   react renders [--json]          Show render commits with per-component timing
   react flamegraph <file>         Export renders as speedscope flamegraph
