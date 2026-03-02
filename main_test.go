@@ -51,6 +51,7 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("/empty", handleEmpty)
 	mux.HandleFunc("/scroll", handleScrollPage)
 	mux.HandleFunc("/keyboard", handleKeyboardPage)
+	mux.HandleFunc("/cookie", handleCookiePage)
 	server := httptest.NewServer(mux)
 
 	env = &testEnv{browser: browser, server: server}
@@ -920,4 +921,219 @@ func TestConsole_RuntimeEvent(t *testing.T) {
 	if !received {
 		t.Error("expected to receive RuntimeConsoleAPICalled event")
 	}
+}
+
+// --- Cookie fixture ---
+
+func handleCookiePage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Set-Cookie", "testcookie=hello; Path=/")
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Cookie Page</title></head>
+<body><p>Cookie test</p></body>
+</html>`))
+}
+
+// =====================
+// cookies tests
+// =====================
+
+func TestCookies_ListFromPage(t *testing.T) {
+	page := navigateTo(t, "/cookie")
+	cookies, err := page.Cookies(nil)
+	if err != nil {
+		t.Fatalf("failed to get cookies: %v", err)
+	}
+	found := false
+	for _, c := range cookies {
+		if c.Name == "testcookie" && c.Value == "hello" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find 'testcookie=hello' from Set-Cookie header")
+	}
+}
+
+func TestCookies_SetAndGet(t *testing.T) {
+	page := navigateTo(t, "/")
+	info, _ := page.Info()
+	err := page.SetCookies([]*proto.NetworkCookieParam{
+		{
+			Name:  "mycookie",
+			Value: "myvalue",
+			URL:   info.URL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("SetCookies failed: %v", err)
+	}
+
+	cookies, err := page.Cookies(nil)
+	if err != nil {
+		t.Fatalf("failed to get cookies: %v", err)
+	}
+
+	found := false
+	for _, c := range cookies {
+		if c.Name == "mycookie" && c.Value == "myvalue" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected to find 'mycookie=myvalue' after SetCookies")
+	}
+}
+
+func TestCookies_Delete(t *testing.T) {
+	page := navigateTo(t, "/")
+	info, _ := page.Info()
+	page.SetCookies([]*proto.NetworkCookieParam{
+		{
+			Name:  "delme",
+			Value: "gone",
+			URL:   info.URL,
+		},
+	})
+
+	cookies, _ := page.Cookies(nil)
+	found := false
+	for _, c := range cookies {
+		if c.Name == "delme" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("cookie 'delme' not found after setting")
+	}
+
+	err := proto.NetworkDeleteCookies{Name: "delme", URL: info.URL}.Call(page)
+	if err != nil {
+		t.Fatalf("NetworkDeleteCookies failed: %v", err)
+	}
+
+	cookies, _ = page.Cookies(nil)
+	for _, c := range cookies {
+		if c.Name == "delme" {
+			t.Error("cookie 'delme' still exists after deletion")
+		}
+	}
+}
+
+func TestCookies_Clear(t *testing.T) {
+	page := navigateTo(t, "/")
+	info, _ := page.Info()
+	page.SetCookies([]*proto.NetworkCookieParam{
+		{Name: "a", Value: "1", URL: info.URL},
+		{Name: "b", Value: "2", URL: info.URL},
+	})
+
+	cookies, _ := page.Cookies(nil)
+	if len(cookies) < 2 {
+		t.Fatalf("expected at least 2 cookies, got %d", len(cookies))
+	}
+
+	if err := page.SetCookies(nil); err != nil {
+		t.Fatalf("SetCookies(nil) failed: %v", err)
+	}
+
+	cookies, _ = page.Cookies(nil)
+	if len(cookies) != 0 {
+		t.Errorf("expected 0 cookies after clear, got %d", len(cookies))
+	}
+}
+
+// =====================
+// storage tests
+// =====================
+
+func TestStorage_SetAndGet(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	_, err := page.Eval(`() => localStorage.setItem("testkey", "testvalue")`)
+	if err != nil {
+		t.Fatalf("setItem failed: %v", err)
+	}
+
+	result, err := page.Eval(`() => localStorage.getItem("testkey")`)
+	if err != nil {
+		t.Fatalf("getItem failed: %v", err)
+	}
+
+	if result.Value.Str() != "testvalue" {
+		t.Errorf("expected 'testvalue', got %q", result.Value.Str())
+	}
+
+	page.Eval(`() => localStorage.removeItem("testkey")`)
+}
+
+func TestStorage_Delete(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	page.Eval(`() => localStorage.setItem("delkey", "delvalue")`)
+	page.Eval(`() => localStorage.removeItem("delkey")`)
+
+	result, err := page.Eval(`() => localStorage.getItem("delkey")`)
+	if err != nil {
+		t.Fatalf("getItem failed: %v", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	if raw != "null" {
+		t.Errorf("expected null after delete, got %q", raw)
+	}
+}
+
+func TestStorage_Clear(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	page.Eval(`() => {
+		localStorage.setItem("k1", "v1");
+		localStorage.setItem("k2", "v2");
+	}`)
+
+	page.Eval(`() => localStorage.clear()`)
+
+	result, err := page.Eval(`() => localStorage.length`)
+	if err != nil {
+		t.Fatalf("length check failed: %v", err)
+	}
+
+	if result.Value.Int() != 0 {
+		t.Errorf("expected 0 items after clear, got %d", result.Value.Int())
+	}
+}
+
+func TestStorage_Session(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	_, err := page.Eval(`() => sessionStorage.setItem("sesskey", "sessvalue")`)
+	if err != nil {
+		t.Fatalf("setItem failed: %v", err)
+	}
+
+	result, err := page.Eval(`() => sessionStorage.getItem("sesskey")`)
+	if err != nil {
+		t.Fatalf("getItem failed: %v", err)
+	}
+
+	if result.Value.Str() != "sessvalue" {
+		t.Errorf("expected 'sessvalue', got %q", result.Value.Str())
+	}
+
+	// Verify localStorage doesn't have it
+	result, err = page.Eval(`() => localStorage.getItem("sesskey")`)
+	if err != nil {
+		t.Fatalf("localStorage getItem failed: %v", err)
+	}
+	raw := result.Value.JSON("", "")
+	if raw != "null" {
+		t.Errorf("expected sesskey to not be in localStorage, got %q", raw)
+	}
+
+	page.Eval(`() => sessionStorage.removeItem("sesskey")`)
 }

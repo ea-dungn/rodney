@@ -219,6 +219,10 @@ func main() {
 		cmdConsole(args)
 	case "network":
 		cmdNetwork(args)
+	case "cookies":
+		cmdCookies(args)
+	case "storage":
+		cmdStorage(args)
 	case "help", "-h", "--help":
 		printUsage()
 		os.Exit(0)
@@ -2494,6 +2498,443 @@ func cmdConsoleFollow(page *rod.Page, errorsOnly, jsonOutput bool) {
 	})
 
 	wait()
+}
+
+// --- Cookies command group ---
+
+func cmdCookies(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rodney cookies <subcommand>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Subcommands:")
+		fmt.Fprintln(os.Stderr, "  list [--json]              List all cookies for current page")
+		fmt.Fprintln(os.Stderr, "  get <name>                 Get a cookie value by name")
+		fmt.Fprintln(os.Stderr, "  set <name> <value> [flags] Set a cookie")
+		fmt.Fprintln(os.Stderr, "  delete <name> [--domain D] Delete a cookie by name")
+		fmt.Fprintln(os.Stderr, "  clear                      Clear all cookies")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "list":
+		cmdCookiesList(subargs)
+	case "get":
+		cmdCookiesGet(subargs)
+	case "set":
+		cmdCookiesSet(subargs)
+	case "delete":
+		cmdCookiesDelete(subargs)
+	case "clear":
+		cmdCookiesClear(subargs)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown cookies subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func cmdCookiesList(args []string) {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney cookies list [--json]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+	cookies, err := page.Cookies(nil)
+	if err != nil {
+		fatal("failed to get cookies: %v", err)
+	}
+
+	if len(cookies) == 0 {
+		fmt.Fprintln(os.Stderr, "No cookies found")
+		return
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(cookies, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("%-20s %-40s %-20s %-8s %s\n", "NAME", "VALUE", "DOMAIN", "PATH", "EXPIRES")
+		fmt.Println(strings.Repeat("-", 110))
+		for _, c := range cookies {
+			val := c.Value
+			if len(val) > 40 {
+				val = val[:37] + "..."
+			}
+			expires := "Session"
+			if c.Expires > 0 {
+				t := time.Unix(int64(c.Expires), 0)
+				expires = t.Format("2006-01-02 15:04")
+			}
+			fmt.Printf("%-20s %-40s %-20s %-8s %s\n", c.Name, val, c.Domain, c.Path, expires)
+		}
+		fmt.Printf("\nTotal cookies: %d\n", len(cookies))
+	}
+}
+
+func cmdCookiesGet(args []string) {
+	if len(args) < 1 {
+		fatal("usage: rodney cookies get <name>")
+	}
+	name := args[0]
+
+	_, _, page := withPage()
+	cookies, err := page.Cookies(nil)
+	if err != nil {
+		fatal("failed to get cookies: %v", err)
+	}
+
+	for _, c := range cookies {
+		if c.Name == name {
+			fmt.Println(c.Value)
+			return
+		}
+	}
+	fmt.Fprintf(os.Stderr, "cookie %q not found\n", name)
+	os.Exit(1)
+}
+
+func cmdCookiesSet(args []string) {
+	var domain, path string
+	var secure, httpOnly bool
+	var expires float64
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--domain":
+			i++
+			if i >= len(args) {
+				fatal("missing value for --domain")
+			}
+			domain = args[i]
+		case "--path":
+			i++
+			if i >= len(args) {
+				fatal("missing value for --path")
+			}
+			path = args[i]
+		case "--secure":
+			secure = true
+		case "--httponly":
+			httpOnly = true
+		case "--expires":
+			i++
+			if i >= len(args) {
+				fatal("missing value for --expires")
+			}
+			v, err := strconv.ParseFloat(args[i], 64)
+			if err != nil {
+				fatal("invalid expires: %v", err)
+			}
+			expires = v
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+
+	if len(positional) < 2 {
+		fatal("usage: rodney cookies set <name> <value> [--domain D] [--path P] [--secure] [--httponly] [--expires UNIX]")
+	}
+
+	name := positional[0]
+	value := positional[1]
+	_, _, page := withPage()
+
+	param := &proto.NetworkCookieParam{
+		Name:     name,
+		Value:    value,
+		Secure:   secure,
+		HTTPOnly: httpOnly,
+	}
+
+	if domain != "" {
+		param.Domain = domain
+	}
+	if path != "" {
+		param.Path = path
+	}
+	if expires > 0 {
+		param.Expires = proto.TimeSinceEpoch(expires)
+	}
+
+	// If no domain given, scope to current page URL
+	if domain == "" {
+		info, err := page.Info()
+		if err == nil && info != nil {
+			param.URL = info.URL
+		}
+	}
+
+	if err := page.SetCookies([]*proto.NetworkCookieParam{param}); err != nil {
+		fatal("failed to set cookie: %v", err)
+	}
+	fmt.Printf("Set cookie: %s=%s\n", name, value)
+}
+
+func cmdCookiesDelete(args []string) {
+	var domain string
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--domain":
+			i++
+			if i >= len(args) {
+				fatal("missing value for --domain")
+			}
+			domain = args[i]
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+
+	if len(positional) < 1 {
+		fatal("usage: rodney cookies delete <name> [--domain D]")
+	}
+
+	name := positional[0]
+	_, _, page := withPage()
+
+	req := proto.NetworkDeleteCookies{Name: name}
+	if domain != "" {
+		req.Domain = domain
+	} else {
+		info, err := page.Info()
+		if err == nil && info != nil {
+			req.URL = info.URL
+		}
+	}
+
+	if err := req.Call(page); err != nil {
+		fatal("failed to delete cookie: %v", err)
+	}
+	fmt.Printf("Deleted cookie: %s\n", name)
+}
+
+func cmdCookiesClear(args []string) {
+	_, _, page := withPage()
+	if err := page.SetCookies(nil); err != nil {
+		fatal("failed to clear cookies: %v", err)
+	}
+	fmt.Println("All cookies cleared")
+}
+
+// --- Storage command group ---
+
+func storageType(session bool) string {
+	if session {
+		return "sessionStorage"
+	}
+	return "localStorage"
+}
+
+func cmdStorage(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rodney storage <subcommand>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Subcommands:")
+		fmt.Fprintln(os.Stderr, "  list [--session] [--json]     List storage items")
+		fmt.Fprintln(os.Stderr, "  get <key> [--session]         Get a storage value")
+		fmt.Fprintln(os.Stderr, "  set <key> <value> [--session] Set a storage value")
+		fmt.Fprintln(os.Stderr, "  delete <key> [--session]      Delete a storage key")
+		fmt.Fprintln(os.Stderr, "  clear [--session]             Clear all storage")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "list":
+		cmdStorageList(subargs)
+	case "get":
+		cmdStorageGet(subargs)
+	case "set":
+		cmdStorageSet(subargs)
+	case "delete":
+		cmdStorageDelete(subargs)
+	case "clear":
+		cmdStorageClear(subargs)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown storage subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func cmdStorageList(args []string) {
+	session := false
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--session":
+			session = true
+		case "--json":
+			jsonOutput = true
+		default:
+			fatal("unknown flag: %s\nusage: rodney storage list [--session] [--json]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+	st := storageType(session)
+
+	js := fmt.Sprintf(`() => {
+		const s = %s;
+		const result = {};
+		for (let i = 0; i < s.length; i++) {
+			const key = s.key(i);
+			result[key] = s.getItem(key);
+		}
+		return result;
+	}`, st)
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to read %s: %v", st, err)
+	}
+
+	raw := result.Value.JSON("", "")
+	if raw == "{}" || raw == "null" {
+		fmt.Fprintf(os.Stderr, "No items in %s\n", st)
+		return
+	}
+
+	if jsonOutput {
+		fmt.Println(result.Value.JSON("", "  "))
+	} else {
+		var items map[string]string
+		if err := json.Unmarshal([]byte(raw), &items); err != nil {
+			fatal("failed to parse storage data: %v", err)
+		}
+		fmt.Printf("%-30s %s\n", "KEY", "VALUE")
+		fmt.Println(strings.Repeat("-", 80))
+		for k, v := range items {
+			if len(v) > 50 {
+				v = v[:47] + "..."
+			}
+			fmt.Printf("%-30s %s\n", k, v)
+		}
+		fmt.Printf("\nTotal items: %d\n", len(items))
+	}
+}
+
+func cmdStorageGet(args []string) {
+	session := false
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--session" {
+			session = true
+		} else {
+			positional = append(positional, args[i])
+		}
+	}
+
+	if len(positional) < 1 {
+		fatal("usage: rodney storage get <key> [--session]")
+	}
+
+	key := positional[0]
+	_, _, page := withPage()
+	st := storageType(session)
+
+	js := fmt.Sprintf(`() => %s.getItem(%q)`, st, key)
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to read %s: %v", st, err)
+	}
+
+	raw := result.Value.JSON("", "")
+	if raw == "null" {
+		fmt.Fprintf(os.Stderr, "key %q not found in %s\n", key, st)
+		os.Exit(1)
+	}
+	fmt.Println(result.Value.Str())
+}
+
+func cmdStorageSet(args []string) {
+	session := false
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--session" {
+			session = true
+		} else {
+			positional = append(positional, args[i])
+		}
+	}
+
+	if len(positional) < 2 {
+		fatal("usage: rodney storage set <key> <value> [--session]")
+	}
+
+	key := positional[0]
+	value := positional[1]
+	_, _, page := withPage()
+	st := storageType(session)
+
+	js := fmt.Sprintf(`() => %s.setItem(%q, %q)`, st, key, value)
+	_, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to write %s: %v", st, err)
+	}
+	fmt.Printf("Set %s: %s=%s\n", st, key, value)
+}
+
+func cmdStorageDelete(args []string) {
+	session := false
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--session" {
+			session = true
+		} else {
+			positional = append(positional, args[i])
+		}
+	}
+
+	if len(positional) < 1 {
+		fatal("usage: rodney storage delete <key> [--session]")
+	}
+
+	key := positional[0]
+	_, _, page := withPage()
+	st := storageType(session)
+
+	js := fmt.Sprintf(`() => %s.removeItem(%q)`, st, key)
+	_, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to delete from %s: %v", st, err)
+	}
+	fmt.Printf("Deleted %s key: %s\n", st, key)
+}
+
+func cmdStorageClear(args []string) {
+	session := false
+	for _, arg := range args {
+		if arg == "--session" {
+			session = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney storage clear [--session]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+	st := storageType(session)
+
+	js := fmt.Sprintf(`() => %s.clear()`, st)
+	_, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to clear %s: %v", st, err)
+	}
+	fmt.Printf("Cleared %s\n", st)
 }
 
 // --- Auth proxy for environments with authenticated HTTP proxies ---

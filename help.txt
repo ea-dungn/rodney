@@ -89,6 +89,26 @@ PERFORMANCE:
   perf vitals [--json]            Show Core Web Vitals (LCP, CLS, TTFB)
   perf timing [--json]            Show navigation timing breakdown
 
+COOKIES:
+  cookies list [--json]           List all cookies for current page
+  cookies get <name>              Get a cookie value by name
+  cookies set <name> <value> [--domain D] [--path P] [--secure] [--httponly]
+                                  [--expires UNIX]
+                                  Set a cookie
+  cookies delete <name> [--domain D]
+                                  Delete a cookie by name
+  cookies clear                   Clear all cookies
+
+STORAGE:
+  storage list [--session] [--json]
+                                  List localStorage items (--session for sessionStorage)
+  storage get <key> [--session]   Get a storage value
+  storage set <key> <value> [--session]
+                                  Set a storage value
+  storage delete <key> [--session]
+                                  Delete a storage key
+  storage clear [--session]       Clear all storage
+
 NETWORK INSPECTION:
   network list [--json] [--filter <url-pattern>]
                                   List all network requests with timing info
