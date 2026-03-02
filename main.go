@@ -1615,7 +1615,7 @@ func cmdNetworkList(args []string) {
 			}
 			filterURL = args[i]
 		default:
-			fatal("unknown flag: %s\nusage: rodney network-list [--json] [--filter <pattern>]", args[i])
+			fatal("unknown flag: %s\nusage: rodney network list [--json] [--filter <pattern>]", args[i])
 		}
 	}
 
@@ -1825,7 +1825,7 @@ func cmdNetworkClear(args []string) {
 
 func cmdNetworkSave(args []string) {
 	if len(args) < 1 {
-		fatal("usage: rodney network-save <file.json>")
+		fatal("usage: rodney network save <file.json>")
 	}
 	file := args[0]
 
