@@ -38,6 +38,7 @@ type State struct {
 	DataDir     string `json:"data_dir"`
 	ProxyPID    int    `json:"proxy_pid,omitempty"`  // PID of auth proxy helper
 	ProxyPort   int    `json:"proxy_port,omitempty"` // local port of auth proxy
+	ReactHook   bool   `json:"react_hook,omitempty"` // true if React DevTools hook should be injected
 }
 
 func stateDir() string {
@@ -85,14 +86,21 @@ func connectBrowser(s *State) (*rod.Browser, error) {
 	return browser, nil
 }
 
-// getActivePage returns the currently active page
+// getActivePage returns the currently active page, creating a blank one if none exist
 func getActivePage(browser *rod.Browser, s *State) (*rod.Page, error) {
 	pages, err := browser.Pages()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pages: %w", err)
 	}
 	if len(pages) == 0 {
-		return nil, fmt.Errorf("no pages open")
+		// Auto-create a blank page so commands don't fail after 'rodney start'
+		page, err := browser.Page(proto.TargetCreateTarget{URL: ""})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create initial page: %w", err)
+		}
+		s.ActivePage = 0
+		saveState(s)
+		return page, nil
 	}
 	idx := s.ActivePage
 	if idx < 0 || idx >= len(pages) {
@@ -266,6 +274,16 @@ func withPage() (*State, *rod.Browser, *rod.Page) {
 	return s, browser, page
 }
 
+// injectReactHook registers the React DevTools hook on a page so it runs
+// before any JS on new document loads, and also evals it into the current page.
+func injectReactHook(page *rod.Page) {
+	proto.PageAddScriptToEvaluateOnNewDocument{Source: reactHookJS}.Call(page)
+	page.Eval(`() => {
+		if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__) return;
+		` + reactHookJS + `
+	}`)
+}
+
 // --- Commands ---
 
 func cmdStart(args []string) {
@@ -431,6 +449,10 @@ func cmdOpen(args []string) {
 		if err != nil {
 			fatal("%v", err)
 		}
+		// Re-inject React hook before navigation so it's present when React initializes
+		if s.ReactHook {
+			injectReactHook(page)
+		}
 		if err := page.Navigate(url); err != nil {
 			fatal("navigation failed: %v", err)
 		}
@@ -472,7 +494,12 @@ func cmdReload(args []string) {
 		}
 	}
 
-	_, _, page := withPage()
+	s, _, page := withPage()
+
+	// Re-inject React hook before reload so it's present when React re-initializes
+	if s.ReactHook {
+		injectReactHook(page)
+	}
 
 	if hard {
 		err := proto.PageReload{IgnoreCache: true}.Call(page)
@@ -1138,17 +1165,22 @@ func cmdNewPage(args []string) {
 	url := ""
 	if len(args) > 0 {
 		url = args[0]
-		if !strings.Contains(url, "://") {
+		if url != "about:blank" && !strings.Contains(url, "://") {
 			url = "http://" + url
 		}
 	}
 
 	var page *rod.Page
-	if url != "" {
+	if url == "" || url == "about:blank" {
+		// Use TargetCreateTarget for blank pages — MustPage panics on about:blank
+		p, err := browser.Page(proto.TargetCreateTarget{URL: ""})
+		if err != nil {
+			fatal("failed to create new page: %v", err)
+		}
+		page = p
+	} else {
 		page = browser.MustPage(url)
 		page.MustWaitLoad()
-	} else {
-		page = browser.MustPage("")
 	}
 
 	// Switch active to the new page
@@ -2165,10 +2197,8 @@ func cmdPerf(args []string) {
 		fmt.Fprintln(os.Stderr, "  metrics [--json]    Show runtime performance metrics")
 		fmt.Fprintln(os.Stderr, "  vitals [--json]     Show Core Web Vitals (LCP, CLS, TTFB)")
 		fmt.Fprintln(os.Stderr, "  timing [--json]     Show navigation timing breakdown")
-		fmt.Fprintln(os.Stderr, "  profile start       Start CPU profiling")
-		fmt.Fprintln(os.Stderr, "  profile stop <file> Stop and save .cpuprofile")
-		fmt.Fprintln(os.Stderr, "  trace start         Start browser trace")
-		fmt.Fprintln(os.Stderr, "  trace stop <file>   Stop and save trace JSON")
+		fmt.Fprintln(os.Stderr, "  profile <secs> [file]  Record CPU profile for N seconds")
+		fmt.Fprintln(os.Stderr, "  trace <secs> [file]    Record browser trace for N seconds")
 		os.Exit(1)
 	}
 
@@ -2356,33 +2386,32 @@ func cmdPerfTiming(args []string) {
 
 // --- CPU profiling ---
 
-func profileStatePath() string {
-	return filepath.Join(stateDir(), "profiling.json")
-}
-
 func cmdPerfProfile(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: rodney perf profile <start|stop>")
+		fmt.Fprintln(os.Stderr, "usage: rodney perf profile <seconds> [file.cpuprofile]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  start              Start CPU profiling")
-		fmt.Fprintln(os.Stderr, "  stop <file>        Stop and save .cpuprofile")
+		fmt.Fprintln(os.Stderr, "  Records a CPU profile for the given duration.")
+		fmt.Fprintln(os.Stderr, "  Open with: npx speedscope <file>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  Tip: set up scrolling/actions BEFORE profiling via rodney js:")
+		fmt.Fprintln(os.Stderr, `    rodney js "setInterval(() => scrollBy(0,100), 50)"`)
+		fmt.Fprintln(os.Stderr, "    rodney perf profile 3 scroll.cpuprofile")
 		os.Exit(1)
 	}
 
-	switch args[0] {
-	case "start":
-		cmdPerfProfileStart(args[1:])
-	case "stop":
-		cmdPerfProfileStop(args[1:])
-	default:
-		fatal("unknown profile subcommand: %s", args[0])
+	duration, err := strconv.ParseFloat(args[0], 64)
+	if err != nil || duration <= 0 {
+		fatal("invalid duration: %s (must be a positive number of seconds)", args[0])
 	}
-}
 
-func cmdPerfProfileStart(args []string) {
+	file := "profile.cpuprofile"
+	if len(args) > 1 {
+		file = args[1]
+	}
+
 	_, _, page := withPage()
 
-	err := proto.ProfilerEnable{}.Call(page)
+	err = proto.ProfilerEnable{}.Call(page)
 	if err != nil {
 		fatal("failed to enable profiler: %v", err)
 	}
@@ -2392,20 +2421,8 @@ func cmdPerfProfileStart(args []string) {
 		fatal("failed to start profiling: %v", err)
 	}
 
-	// Mark that profiling is active
-	os.WriteFile(profileStatePath(), []byte(`{"profiling":true}`), 0644)
-
-	fmt.Println("CPU profiling started")
-	fmt.Println("Run 'rodney perf profile stop <file.cpuprofile>' to save")
-}
-
-func cmdPerfProfileStop(args []string) {
-	file := "profile.cpuprofile"
-	if len(args) > 0 {
-		file = args[0]
-	}
-
-	_, _, page := withPage()
+	fmt.Fprintf(os.Stderr, "Profiling for %.1fs...\n", duration)
+	time.Sleep(time.Duration(duration * float64(time.Second)))
 
 	result, err := proto.ProfilerStop{}.Call(page)
 	if err != nil {
@@ -2421,8 +2438,6 @@ func cmdPerfProfileStop(args []string) {
 		fatal("failed to write profile: %v", err)
 	}
 
-	os.Remove(profileStatePath())
-
 	fmt.Printf("Saved CPU profile to %s (%d bytes)\n", file, len(data))
 	fmt.Println("Open with: npx speedscope " + file)
 }
@@ -2431,52 +2446,25 @@ func cmdPerfProfileStop(args []string) {
 
 func cmdPerfTrace(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: rodney perf trace <start|stop>")
+		fmt.Fprintln(os.Stderr, "usage: rodney perf trace <seconds> [file.json]")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  start              Start browser trace")
-		fmt.Fprintln(os.Stderr, "  stop <file>        Stop and save trace JSON")
+		fmt.Fprintln(os.Stderr, "  Records a full browser trace for the given duration.")
+		fmt.Fprintln(os.Stderr, "  Open with: https://ui.perfetto.dev")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  Tip: set up scrolling/actions BEFORE tracing via rodney js:")
+		fmt.Fprintln(os.Stderr, `    rodney js "setInterval(() => scrollBy(0,100), 50)"`)
+		fmt.Fprintln(os.Stderr, "    rodney perf trace 3 scroll-trace.json")
 		os.Exit(1)
 	}
 
-	switch args[0] {
-	case "start":
-		cmdPerfTraceStart(args[1:])
-	case "stop":
-		cmdPerfTraceStop(args[1:])
-	default:
-		fatal("unknown trace subcommand: %s", args[0])
-	}
-}
-
-func cmdPerfTraceStart(args []string) {
-	s, err := loadState()
-	if err != nil {
-		fatal("%v", err)
-	}
-	browser, err := connectBrowser(s)
-	if err != nil {
-		fatal("%v", err)
+	duration, err := strconv.ParseFloat(args[0], 64)
+	if err != nil || duration <= 0 {
+		fatal("invalid duration: %s (must be a positive number of seconds)", args[0])
 	}
 
-	// Tracing operates at the browser level, use ReportEvents to get data via events
-	err = proto.TracingStart{
-		Categories:   "-*,devtools.timeline,v8.execute,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.frame,disabled-by-default-v8.cpu_profiler",
-		TransferMode: proto.TracingStartTransferModeReportEvents,
-	}.Call(browser)
-	if err != nil {
-		fatal("failed to start tracing: %v", err)
-	}
-
-	os.WriteFile(filepath.Join(stateDir(), "tracing.json"), []byte(`{"tracing":true}`), 0644)
-
-	fmt.Println("Browser tracing started")
-	fmt.Println("Run 'rodney perf trace stop <file.json>' to save")
-}
-
-func cmdPerfTraceStop(args []string) {
 	file := "trace.json"
-	if len(args) > 0 {
-		file = args[0]
+	if len(args) > 1 {
+		file = args[1]
 	}
 
 	s, err := loadState()
@@ -2488,13 +2476,12 @@ func cmdPerfTraceStop(args []string) {
 		fatal("%v", err)
 	}
 
-	// Collect trace data chunks
+	// Collect trace data chunks via events
 	var chunks []json.RawMessage
 	done := make(chan struct{})
 
 	go browser.EachEvent(
 		func(e *proto.TracingDataCollected) {
-			// Each Value item is a trace event map — marshal it back to JSON
 			for _, item := range e.Value {
 				data, err := json.Marshal(item)
 				if err == nil {
@@ -2506,6 +2493,18 @@ func cmdPerfTraceStop(args []string) {
 			close(done)
 		},
 	)()
+
+	// Start tracing
+	err = proto.TracingStart{
+		Categories:   "-*,devtools.timeline,v8.execute,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.frame,disabled-by-default-v8.cpu_profiler",
+		TransferMode: proto.TracingStartTransferModeReportEvents,
+	}.Call(browser)
+	if err != nil {
+		fatal("failed to start tracing: %v", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Tracing for %.1fs...\n", duration)
+	time.Sleep(time.Duration(duration * float64(time.Second)))
 
 	// End tracing
 	err = proto.TracingEnd{}.Call(browser)
@@ -2535,8 +2534,6 @@ func cmdPerfTraceStop(args []string) {
 		f.Write(chunk)
 	}
 	f.WriteString("]")
-
-	os.Remove(filepath.Join(stateDir(), "tracing.json"))
 
 	fmt.Printf("Saved browser trace to %s\n", file)
 	fmt.Println("Open with: https://ui.perfetto.dev or Chrome DevTools Performance tab")
@@ -2632,27 +2629,15 @@ func cmdReact(args []string) {
 }
 
 func cmdReactHook(args []string) {
-	_, _, page := withPage()
+	s, _, page := withPage()
 
-	// Inject the hook so it runs before any JS on new page loads
-	_, err := proto.PageAddScriptToEvaluateOnNewDocument{Source: reactHookJS}.Call(page)
-	if err != nil {
-		fatal("failed to inject React hook: %v", err)
-	}
+	injectReactHook(page)
 
-	// Also inject into the current page in case React hasn't loaded yet
-	_, evalErr := page.Eval(`() => {
-		if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__) {
-			return 'already installed';
-		}
-		` + reactHookJS + `
-		return 'installed';
-	}`)
-	if evalErr != nil {
-		fatal("failed to eval hook: %v", evalErr)
-	}
+	// Persist so future open/reload commands re-inject automatically
+	s.ReactHook = true
+	saveState(s)
 
-	fmt.Println("React DevTools hook installed")
+	fmt.Println("React DevTools hook installed (persists across navigations)")
 	fmt.Println("Now run 'rodney open <url>' to navigate to a React app")
 	fmt.Println("Then use 'rodney react renders' or 'rodney react tree' to inspect")
 }

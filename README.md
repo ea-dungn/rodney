@@ -249,17 +249,13 @@ rodney perf timing                 # Navigation timing breakdown
 rodney perf metrics --json         # Any subcommand supports --json
 
 # CPU profiling (outputs .cpuprofile for speedscope)
-rodney perf profile start
-rodney click "#load-data"
-rodney waitidle
-rodney perf profile stop profile.cpuprofile
-npx speedscope profile.cpuprofile       # Visualize
+# Tip: set up the action BEFORE profiling
+rodney js "setInterval(() => scrollBy(0, 100), 50)"
+rodney perf profile 3 scroll.cpuprofile
+npx speedscope scroll.cpuprofile        # Visualize
 
 # Full browser trace (outputs trace JSON for Perfetto)
-rodney perf trace start
-rodney open https://example.com
-rodney waitload
-rodney perf trace stop trace.json
+rodney perf trace 5 trace.json
 # Open https://ui.perfetto.dev and load trace.json
 ```
 
@@ -417,10 +413,8 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `perf metrics` | `[--json]` | Runtime performance metrics |
 | `perf vitals` | `[--json]` | Core Web Vitals |
 | `perf timing` | `[--json]` | Navigation timing breakdown |
-| `perf profile start` | | Start CPU profiling |
-| `perf profile stop` | `[file]` | Stop and save .cpuprofile |
-| `perf trace start` | | Start browser trace |
-| `perf trace stop` | `[file]` | Stop and save trace JSON |
+| `perf profile` | `<seconds> [file]` | Record CPU profile |
+| `perf trace` | `<seconds> [file]` | Record browser trace |
 | `react hook` | | Install React DevTools hook |
 | `react tree` | `[--json]` | Show component tree |
 | `react renders` | `[--json]` | Show render commits with timing |

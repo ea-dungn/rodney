@@ -88,10 +88,8 @@ PERFORMANCE:
   perf metrics [--json]           Show runtime performance metrics
   perf vitals [--json]            Show Core Web Vitals (LCP, CLS, TTFB)
   perf timing [--json]            Show navigation timing breakdown
-  perf profile start              Start CPU profiling
-  perf profile stop [file]        Stop and save .cpuprofile (for speedscope)
-  perf trace start                Start full browser trace
-  perf trace stop [file]          Stop and save trace JSON (for Perfetto)
+  perf profile <secs> [file]      Record CPU profile (outputs .cpuprofile)
+  perf trace <secs> [file]        Record browser trace (outputs JSON for Perfetto)
 
 REACT PROFILING:
   react hook                      Install React DevTools hook (before open!)
