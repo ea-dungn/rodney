@@ -18,7 +18,7 @@ NAVIGATION:
   open <url>                      Navigate to URL (http:// added if missing)
   back                            Go back in history
   forward                         Go forward in history
-  reload                          Reload current page
+  reload [--hard]                  Reload current page (--hard bypasses cache)
 
 PAGE INFORMATION:
   url                             Print current URL
@@ -40,11 +40,22 @@ INTERACTION:
   hover <selector>                Hover over an element
   focus <selector>                Focus an element
 
+SCROLLING:
+  scroll <selector>               Scroll element into view
+  scroll up|down|left|right [px]  Scroll direction (default 300px)
+  scroll top|bottom               Scroll to page top/bottom
+
+KEYBOARD:
+  key <Enter|Tab|Escape|...>      Press a named key
+  key <ctrl+a|shift+Tab|...>      Press a key combination
+  key <text>                      Type text character by character
+
 WAITING:
   wait <selector>                 Wait for element to appear and be visible
   waitload                        Wait for page load event
   waitstable                      Wait for DOM to stop changing
   waitidle                        Wait for network to be idle
+  waitfor [--timeout N] <js-expr> Wait until JS expression is truthy
   sleep <seconds>                 Sleep for N seconds
 
 SCREENSHOTS:
@@ -67,6 +78,16 @@ ACCESSIBILITY TESTING:
   ax-find [--name N] [--role R] [--json]
                                   Find accessible nodes by name/role
   ax-node <selector> [--json]     Show element's accessibility properties
+
+CONSOLE:
+  console [--errors] [--json]     Read captured console messages
+  console --follow [--errors]     Stream console output (Ctrl+C to stop)
+  console --clear                 Clear captured messages
+
+PERFORMANCE:
+  perf metrics [--json]           Show runtime performance metrics
+  perf vitals [--json]            Show Core Web Vitals (LCP, CLS, TTFB)
+  perf timing [--json]            Show navigation timing breakdown
 
 NETWORK INSPECTION:
   network list [--json] [--filter <url-pattern>]

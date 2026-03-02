@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 )
@@ -205,6 +207,16 @@ func main() {
 		cmdAXFind(args)
 	case "ax-node":
 		cmdAXNode(args)
+	case "scroll":
+		cmdScroll(args)
+	case "key":
+		cmdKey(args)
+	case "waitfor":
+		cmdWaitFor(args)
+	case "perf":
+		cmdPerf(args)
+	case "console":
+		cmdConsole(args)
 	case "network":
 		cmdNetwork(args)
 	case "help", "-h", "--help":
@@ -445,10 +457,32 @@ func cmdForward(args []string) {
 }
 
 func cmdReload(args []string) {
+	hard := false
+	for _, arg := range args {
+		if arg == "--hard" {
+			hard = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney reload [--hard]", arg)
+		}
+	}
+
 	_, _, page := withPage()
-	page.MustReload()
+
+	if hard {
+		err := proto.PageReload{IgnoreCache: true}.Call(page)
+		if err != nil {
+			fatal("reload failed: %v", err)
+		}
+	} else {
+		page.MustReload()
+	}
 	page.MustWaitLoad()
-	fmt.Println("Reloaded")
+
+	if hard {
+		fmt.Println("Hard reloaded (cache bypassed)")
+	} else {
+		fmt.Println("Reloaded")
+	}
 }
 
 func cmdURL(args []string) {
@@ -1885,6 +1919,581 @@ func cmdNetworkSave(args []string) {
 	}
 
 	fmt.Printf("Saved %d network requests to %s\n", len(entries), file)
+}
+
+// --- Scroll command ---
+
+func cmdScroll(args []string) {
+	if len(args) < 1 {
+		fatal("usage: rodney scroll <up|down|left|right|top|bottom|selector> [pixels]")
+	}
+
+	_, _, page := withPage()
+	direction := args[0]
+	pixels := 300.0
+
+	if len(args) > 1 {
+		v, err := strconv.ParseFloat(args[1], 64)
+		if err != nil {
+			fatal("invalid pixel value: %v", err)
+		}
+		pixels = v
+	}
+
+	switch direction {
+	case "up":
+		if err := page.Mouse.Scroll(0, -pixels, 1); err != nil {
+			fatal("scroll failed: %v", err)
+		}
+		fmt.Printf("Scrolled up %.0fpx\n", pixels)
+	case "down":
+		if err := page.Mouse.Scroll(0, pixels, 1); err != nil {
+			fatal("scroll failed: %v", err)
+		}
+		fmt.Printf("Scrolled down %.0fpx\n", pixels)
+	case "left":
+		if err := page.Mouse.Scroll(-pixels, 0, 1); err != nil {
+			fatal("scroll failed: %v", err)
+		}
+		fmt.Printf("Scrolled left %.0fpx\n", pixels)
+	case "right":
+		if err := page.Mouse.Scroll(pixels, 0, 1); err != nil {
+			fatal("scroll failed: %v", err)
+		}
+		fmt.Printf("Scrolled right %.0fpx\n", pixels)
+	case "top":
+		page.MustEval(`() => window.scrollTo(0, 0)`)
+		fmt.Println("Scrolled to top")
+	case "bottom":
+		page.MustEval(`() => window.scrollTo(0, document.body.scrollHeight)`)
+		fmt.Println("Scrolled to bottom")
+	default:
+		// Treat as CSS selector
+		el, err := page.Element(direction)
+		if err != nil {
+			fatal("element not found: %v", err)
+		}
+		if err := el.ScrollIntoView(); err != nil {
+			fatal("scroll into view failed: %v", err)
+		}
+		fmt.Println("Scrolled into view")
+	}
+}
+
+// --- Key command ---
+
+var keyNameMap = map[string]input.Key{
+	"enter":     input.Enter,
+	"tab":       input.Tab,
+	"escape":    input.Escape,
+	"esc":       input.Escape,
+	"backspace": input.Backspace,
+	"delete":    input.Delete,
+	"space":     input.Space,
+	"arrowup":   input.ArrowUp,
+	"arrowdown": input.ArrowDown,
+	"arrowleft": input.ArrowLeft,
+	"arrowright":input.ArrowRight,
+	"up":        input.ArrowUp,
+	"down":      input.ArrowDown,
+	"left":      input.ArrowLeft,
+	"right":     input.ArrowRight,
+	"home":      input.Home,
+	"end":       input.End,
+	"pageup":    input.PageUp,
+	"pagedown":  input.PageDown,
+	"f1":        input.F1,
+	"f2":        input.F2,
+	"f3":        input.F3,
+	"f4":        input.F4,
+	"f5":        input.F5,
+	"f6":        input.F6,
+	"f7":        input.F7,
+	"f8":        input.F8,
+	"f9":        input.F9,
+	"f10":       input.F10,
+	"f11":       input.F11,
+	"f12":       input.F12,
+}
+
+var modifierMap = map[string]input.Key{
+	"ctrl":    input.ControlLeft,
+	"control": input.ControlLeft,
+	"shift":   input.ShiftLeft,
+	"alt":     input.AltLeft,
+	"meta":    input.MetaLeft,
+	"cmd":     input.MetaLeft,
+}
+
+func resolveKey(name string) (input.Key, bool) {
+	lower := strings.ToLower(name)
+	if k, ok := keyNameMap[lower]; ok {
+		return k, true
+	}
+	if k, ok := modifierMap[lower]; ok {
+		return k, true
+	}
+	// Single character
+	if len(name) == 1 {
+		return input.Key(rune(name[0])), true
+	}
+	return 0, false
+}
+
+func cmdKey(args []string) {
+	if len(args) < 1 {
+		fatal("usage: rodney key <Enter|ctrl+a|text>")
+	}
+	_, _, page := withPage()
+
+	arg := strings.Join(args, " ")
+
+	// Key combo: contains + and no spaces (e.g. ctrl+a, shift+Tab)
+	if strings.Contains(arg, "+") && !strings.Contains(arg, " ") {
+		parts := strings.Split(arg, "+")
+		if len(parts) < 2 {
+			fatal("invalid key combo: %s", arg)
+		}
+
+		// All but the last are modifiers, last is the key
+		ka := page.KeyActions()
+		for _, modName := range parts[:len(parts)-1] {
+			mod, ok := modifierMap[strings.ToLower(modName)]
+			if !ok {
+				fatal("unknown modifier: %s", modName)
+			}
+			ka = ka.Press(mod)
+		}
+
+		keyName := parts[len(parts)-1]
+		key, ok := resolveKey(keyName)
+		if !ok {
+			fatal("unknown key: %s", keyName)
+		}
+		ka = ka.Type(key)
+
+		// Release modifiers in reverse
+		for i := len(parts) - 2; i >= 0; i-- {
+			mod := modifierMap[strings.ToLower(parts[i])]
+			ka = ka.Release(mod)
+		}
+
+		if err := ka.Do(); err != nil {
+			fatal("key combo failed: %v", err)
+		}
+		fmt.Printf("Pressed %s\n", arg)
+		return
+	}
+
+	// Named key (e.g. Enter, Tab, Escape)
+	if key, ok := resolveKey(arg); ok && (len(arg) > 1 || strings.ToLower(arg) != arg) {
+		// Only treat as named key if it's multi-char or a single uppercase letter
+		// This avoids treating "a" as a named key when the user wants to type "a"
+		if len(arg) > 1 {
+			if err := page.Keyboard.Type(key); err != nil {
+				fatal("key press failed: %v", err)
+			}
+			fmt.Printf("Pressed %s\n", arg)
+			return
+		}
+	}
+
+	// Type as text
+	keys := make([]input.Key, 0, len(arg))
+	for _, r := range arg {
+		keys = append(keys, input.Key(r))
+	}
+	if err := page.Keyboard.Type(keys...); err != nil {
+		fatal("type failed: %v", err)
+	}
+	fmt.Printf("Typed: %s\n", arg)
+}
+
+// --- Waitfor command ---
+
+func cmdWaitFor(args []string) {
+	timeout := defaultTimeout
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--timeout":
+			i++
+			if i >= len(args) {
+				fatal("missing value for --timeout")
+			}
+			secs, err := strconv.ParseFloat(args[i], 64)
+			if err != nil {
+				fatal("invalid timeout: %v", err)
+			}
+			timeout = time.Duration(secs * float64(time.Second))
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+
+	if len(positional) < 1 {
+		fatal("usage: rodney waitfor [--timeout N] <js-expression>")
+	}
+
+	expr := strings.Join(positional, " ")
+	_, _, page := withPage()
+
+	// Override the page timeout for this wait
+	page = page.Timeout(timeout)
+
+	js := fmt.Sprintf(`() => !!(%s)`, expr)
+	if err := page.Wait(rod.Eval(js)); err != nil {
+		fatal("wait failed: %v", err)
+	}
+	fmt.Println("Condition met")
+}
+
+// --- Perf command group ---
+
+func cmdPerf(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rodney perf <subcommand>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Subcommands:")
+		fmt.Fprintln(os.Stderr, "  metrics [--json]    Show runtime performance metrics")
+		fmt.Fprintln(os.Stderr, "  vitals [--json]     Show Core Web Vitals (LCP, CLS, TTFB)")
+		fmt.Fprintln(os.Stderr, "  timing [--json]     Show navigation timing breakdown")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "metrics":
+		cmdPerfMetrics(subargs)
+	case "vitals":
+		cmdPerfVitals(subargs)
+	case "timing":
+		cmdPerfTiming(subargs)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown perf subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func cmdPerfMetrics(args []string) {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney perf metrics [--json]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+
+	err := proto.PerformanceEnable{}.Call(page)
+	if err != nil {
+		fatal("failed to enable performance: %v", err)
+	}
+
+	result, err := proto.PerformanceGetMetrics{}.Call(page)
+	if err != nil {
+		fatal("failed to get metrics: %v", err)
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(result.Metrics, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("%-40s %s\n", "METRIC", "VALUE")
+		fmt.Println(strings.Repeat("-", 60))
+		for _, m := range result.Metrics {
+			fmt.Printf("%-40s %.4f\n", m.Name, m.Value)
+		}
+	}
+}
+
+func cmdPerfVitals(args []string) {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney perf vitals [--json]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+
+	js := `() => {
+		const result = {};
+
+		// LCP
+		const lcpEntries = performance.getEntriesByType('largest-contentful-paint');
+		if (lcpEntries.length > 0) {
+			result.lcp = lcpEntries[lcpEntries.length - 1].startTime;
+		}
+
+		// CLS
+		let cls = 0;
+		const layoutShifts = performance.getEntriesByType('layout-shift');
+		for (const entry of layoutShifts) {
+			if (!entry.hadRecentInput) {
+				cls += entry.value;
+			}
+		}
+		result.cls = cls;
+
+		// TTFB
+		const navEntries = performance.getEntriesByType('navigation');
+		if (navEntries.length > 0) {
+			result.ttfb = navEntries[0].responseStart;
+		}
+
+		return result;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get vitals: %v", err)
+	}
+
+	if jsonOutput {
+		fmt.Println(result.Value.JSON("", "  "))
+	} else {
+		data := result.Value
+		fmt.Println("Core Web Vitals:")
+		fmt.Println(strings.Repeat("-", 40))
+		if lcp := data.Get("lcp"); lcp.Num() > 0 || lcp.JSON("", "") != "" {
+			fmt.Printf("  LCP  (Largest Contentful Paint): %.1fms\n", lcp.Num())
+		} else {
+			fmt.Println("  LCP  (Largest Contentful Paint): n/a")
+		}
+		fmt.Printf("  CLS  (Cumulative Layout Shift):  %.4f\n", data.Get("cls").Num())
+		if ttfb := data.Get("ttfb"); ttfb.Num() > 0 || ttfb.JSON("", "") != "" {
+			fmt.Printf("  TTFB (Time to First Byte):       %.1fms\n", ttfb.Num())
+		} else {
+			fmt.Println("  TTFB (Time to First Byte):       n/a")
+		}
+	}
+}
+
+func cmdPerfTiming(args []string) {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney perf timing [--json]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+
+	js := `() => {
+		const nav = performance.getEntriesByType('navigation')[0];
+		if (!nav) return null;
+		return {
+			redirect:        nav.redirectEnd - nav.redirectStart,
+			dns:             nav.domainLookupEnd - nav.domainLookupStart,
+			tcp:             nav.connectEnd - nav.connectStart,
+			tls:             nav.secureConnectionStart > 0 ? nav.connectEnd - nav.secureConnectionStart : 0,
+			ttfb:            nav.responseStart - nav.requestStart,
+			contentDownload: nav.responseEnd - nav.responseStart,
+			domInteractive:  nav.domInteractive - nav.responseEnd,
+			domComplete:     nav.domComplete - nav.domInteractive,
+			loadEvent:       nav.loadEventEnd - nav.loadEventStart,
+			total:           nav.duration
+		};
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get timing: %v", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	if raw == "null" {
+		fatal("no navigation timing data available")
+	}
+
+	if jsonOutput {
+		fmt.Println(result.Value.JSON("", "  "))
+	} else {
+		data := result.Value
+		fmt.Println("Navigation Timing:")
+		fmt.Println(strings.Repeat("-", 40))
+		timings := []struct{ label, key string }{
+			{"Redirect", "redirect"},
+			{"DNS Lookup", "dns"},
+			{"TCP Connect", "tcp"},
+			{"TLS Handshake", "tls"},
+			{"TTFB", "ttfb"},
+			{"Content Download", "contentDownload"},
+			{"DOM Interactive", "domInteractive"},
+			{"DOM Complete", "domComplete"},
+			{"Load Event", "loadEvent"},
+			{"Total", "total"},
+		}
+		for _, t := range timings {
+			fmt.Printf("  %-20s %8.1fms\n", t.label, data.Get(t.key).Num())
+		}
+	}
+}
+
+// --- Console command ---
+
+func cmdConsole(args []string) {
+	follow := false
+	errorsOnly := false
+	jsonOutput := false
+	clearLog := false
+
+	for _, arg := range args {
+		switch arg {
+		case "--follow":
+			follow = true
+		case "--errors":
+			errorsOnly = true
+		case "--json":
+			jsonOutput = true
+		case "--clear":
+			clearLog = true
+		default:
+			fatal("unknown flag: %s\nusage: rodney console [--follow] [--errors] [--json] [--clear]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+
+	if clearLog {
+		page.MustEval(`() => { window.__rodney_console = []; }`)
+		fmt.Println("Console log cleared")
+		return
+	}
+
+	if follow {
+		cmdConsoleFollow(page, errorsOnly, jsonOutput)
+		return
+	}
+
+	// Snapshot mode: install monkey-patch if not already done, then read
+	installed := page.MustEval(`() => !!window.__rodney_console`).Bool()
+	if !installed {
+		page.MustEval(`() => {
+			window.__rodney_console = [];
+			const orig = {};
+			['log', 'warn', 'error', 'info', 'debug'].forEach(level => {
+				orig[level] = console[level];
+				console[level] = function(...args) {
+					window.__rodney_console.push({
+						type: level,
+						text: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '),
+						timestamp: Date.now()
+					});
+					orig[level].apply(console, args);
+				};
+			});
+		}`)
+		fmt.Fprintln(os.Stderr, "Console hook installed. Run JS that logs, then call 'rodney console' again to read.")
+		return
+	}
+
+	// Read captured messages
+	result, err := page.Eval(`() => window.__rodney_console || []`)
+	if err != nil {
+		fatal("failed to read console: %v", err)
+	}
+
+	var messages []map[string]interface{}
+	if err := json.Unmarshal([]byte(result.Value.JSON("", "")), &messages); err != nil {
+		fatal("failed to parse console data: %v", err)
+	}
+
+	if errorsOnly {
+		var filtered []map[string]interface{}
+		for _, m := range messages {
+			t := m["type"].(string)
+			if t == "error" || t == "warn" {
+				filtered = append(filtered, m)
+			}
+		}
+		messages = filtered
+	}
+
+	if len(messages) == 0 {
+		fmt.Fprintln(os.Stderr, "No console messages captured")
+		return
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(messages, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		for _, m := range messages {
+			level := strings.ToUpper(m["type"].(string))
+			text := m["text"].(string)
+			fmt.Printf("[%s] %s\n", level, text)
+		}
+	}
+}
+
+func cmdConsoleFollow(page *rod.Page, errorsOnly, jsonOutput bool) {
+	err := proto.RuntimeEnable{}.Call(page)
+	if err != nil {
+		fatal("failed to enable runtime: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle Ctrl+C
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
+	fmt.Fprintln(os.Stderr, "Streaming console output (Ctrl+C to stop)...")
+
+	page = page.Context(ctx)
+	wait := page.EachEvent(func(e *proto.RuntimeConsoleAPICalled) bool {
+		level := string(e.Type)
+
+		if errorsOnly && level != "error" && level != "warning" {
+			return false
+		}
+
+		var parts []string
+		for _, arg := range e.Args {
+			if arg.Value.JSON("", "") != "" {
+				raw := arg.Value.JSON("", "")
+				if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+					var s string
+					if err := json.Unmarshal([]byte(raw), &s); err == nil {
+						parts = append(parts, s)
+						continue
+					}
+				}
+				parts = append(parts, raw)
+			} else if arg.Description != "" {
+				parts = append(parts, arg.Description)
+			}
+		}
+
+		text := strings.Join(parts, " ")
+
+		if jsonOutput {
+			entry := map[string]string{"type": level, "text": text}
+			data, _ := json.Marshal(entry)
+			fmt.Println(string(data))
+		} else {
+			fmt.Printf("[%s] %s\n", strings.ToUpper(level), text)
+		}
+		return false // keep listening
+	})
+
+	wait()
 }
 
 // --- Auth proxy for environments with authenticated HTTP proxies ---

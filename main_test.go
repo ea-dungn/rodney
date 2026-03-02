@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 )
@@ -48,6 +49,8 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("/download", handleDownload)
 	mux.HandleFunc("/testfile.txt", handleTestFile)
 	mux.HandleFunc("/empty", handleEmpty)
+	mux.HandleFunc("/scroll", handleScrollPage)
+	mux.HandleFunc("/keyboard", handleKeyboardPage)
 	server := httptest.NewServer(mux)
 
 	env = &testEnv{browser: browser, server: server}
@@ -643,5 +646,278 @@ func TestMimeToExt(t *testing.T) {
 		if got != tt.ext {
 			t.Errorf("mimeToExt(%q) = %q, want %q", tt.mime, got, tt.ext)
 		}
+	}
+}
+
+// --- New HTML fixtures ---
+
+func handleScrollPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Scroll Page</title></head>
+<body style="height: 3000px;">
+  <h1 id="top">Top</h1>
+  <div style="height: 2800px;"></div>
+  <div id="bottom">Bottom</div>
+</body>
+</html>`))
+}
+
+func handleKeyboardPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>Keyboard Page</title></head>
+<body>
+  <input id="text-input" type="text" autofocus>
+  <div id="keylog"></div>
+  <script>
+    document.getElementById('text-input').addEventListener('keydown', function(e) {
+      document.getElementById('keylog').textContent += e.key + ' ';
+    });
+  </script>
+</body>
+</html>`))
+}
+
+// =====================
+// scroll tests
+// =====================
+
+func TestScroll_ElementIntoView(t *testing.T) {
+	page := navigateTo(t, "/scroll")
+	el, err := page.Element("#bottom")
+	if err != nil {
+		t.Fatalf("element not found: %v", err)
+	}
+	if err := el.ScrollIntoView(); err != nil {
+		t.Fatalf("scroll into view failed: %v", err)
+	}
+}
+
+func TestScroll_Down(t *testing.T) {
+	page := navigateTo(t, "/scroll")
+	// Get initial scroll position
+	before := page.MustEval(`() => window.scrollY`).Num()
+	if err := page.Mouse.Scroll(0, 300, 1); err != nil {
+		t.Fatalf("scroll down failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	after := page.MustEval(`() => window.scrollY`).Num()
+	if after <= before {
+		t.Errorf("expected scrollY to increase, before=%.0f after=%.0f", before, after)
+	}
+}
+
+func TestScroll_Top(t *testing.T) {
+	page := navigateTo(t, "/scroll")
+	// Scroll down first
+	page.MustEval(`() => window.scrollTo(0, 1000)`)
+	time.Sleep(100 * time.Millisecond)
+	// Scroll to top
+	page.MustEval(`() => window.scrollTo(0, 0)`)
+	time.Sleep(100 * time.Millisecond)
+	pos := page.MustEval(`() => window.scrollY`).Num()
+	if pos != 0 {
+		t.Errorf("expected scrollY=0 after scroll to top, got %.0f", pos)
+	}
+}
+
+// =====================
+// key tests
+// =====================
+
+func TestKeyNameMap(t *testing.T) {
+	lookups := []struct {
+		name string
+		key  input.Key
+	}{
+		{"enter", input.Enter},
+		{"tab", input.Tab},
+		{"escape", input.Escape},
+		{"backspace", input.Backspace},
+		{"delete", input.Delete},
+		{"space", input.Space},
+		{"up", input.ArrowUp},
+		{"down", input.ArrowDown},
+		{"left", input.ArrowLeft},
+		{"right", input.ArrowRight},
+		{"f1", input.F1},
+		{"f12", input.F12},
+	}
+	for _, tt := range lookups {
+		got, ok := keyNameMap[tt.name]
+		if !ok {
+			t.Errorf("keyNameMap missing %q", tt.name)
+			continue
+		}
+		if got != tt.key {
+			t.Errorf("keyNameMap[%q] = %v, want %v", tt.name, got, tt.key)
+		}
+	}
+}
+
+func TestResolveKey(t *testing.T) {
+	// Named key
+	k, ok := resolveKey("Enter")
+	if !ok || k != input.Enter {
+		t.Errorf("resolveKey(Enter) = %v, %v", k, ok)
+	}
+
+	// Single char
+	k, ok = resolveKey("a")
+	if !ok || k != input.Key('a') {
+		t.Errorf("resolveKey(a) = %v, %v", k, ok)
+	}
+
+	// Unknown multi-char string
+	_, ok = resolveKey("notakey")
+	if ok {
+		t.Error("resolveKey(notakey) should return false")
+	}
+}
+
+func TestKey_TypeInInput(t *testing.T) {
+	page := navigateTo(t, "/keyboard")
+	el, err := page.Element("#text-input")
+	if err != nil {
+		t.Fatalf("element not found: %v", err)
+	}
+	el.MustFocus()
+
+	// Type "hi" using keyboard
+	if err := page.Keyboard.Type(input.Key('h'), input.Key('i')); err != nil {
+		t.Fatalf("type failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	val := el.MustEval(`() => this.value`).Str()
+	if val != "hi" {
+		t.Errorf("expected input value 'hi', got %q", val)
+	}
+}
+
+// =====================
+// waitfor tests
+// =====================
+
+func TestWaitFor_ImmediateTrue(t *testing.T) {
+	page := navigateTo(t, "/")
+	err := page.Wait(rod.Eval(`() => !!document.querySelector('h1')`))
+	if err != nil {
+		t.Fatalf("wait failed for existing element: %v", err)
+	}
+}
+
+func TestWaitFor_Timeout(t *testing.T) {
+	page := navigateTo(t, "/")
+	shortPage := page.Timeout(1 * time.Second)
+	err := shortPage.Wait(rod.Eval(`() => !!document.querySelector('#nonexistent-unique-id')`))
+	if err == nil {
+		t.Error("expected timeout error for impossible condition")
+	}
+}
+
+// =====================
+// perf tests
+// =====================
+
+func TestPerfMetrics(t *testing.T) {
+	page := navigateTo(t, "/")
+	err := proto.PerformanceEnable{}.Call(page)
+	if err != nil {
+		t.Fatalf("failed to enable performance: %v", err)
+	}
+	result, err := proto.PerformanceGetMetrics{}.Call(page)
+	if err != nil {
+		t.Fatalf("failed to get metrics: %v", err)
+	}
+	if len(result.Metrics) == 0 {
+		t.Error("expected non-empty metrics")
+	}
+}
+
+func TestPerfTiming(t *testing.T) {
+	page := navigateTo(t, "/")
+	result, err := page.Eval(`() => {
+		const nav = performance.getEntriesByType('navigation')[0];
+		return nav ? nav.duration : null;
+	}`)
+	if err != nil {
+		t.Fatalf("failed to eval timing: %v", err)
+	}
+	raw := result.Value.JSON("", "")
+	if raw == "null" {
+		t.Error("expected navigation timing data, got null")
+	}
+}
+
+// =====================
+// console tests
+// =====================
+
+func TestConsole_MonkeyPatch(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	// Install the monkey-patch
+	page.MustEval(`() => {
+		window.__rodney_console = [];
+		const orig = {};
+		['log', 'warn', 'error', 'info', 'debug'].forEach(level => {
+			orig[level] = console[level];
+			console[level] = function(...args) {
+				window.__rodney_console.push({
+					type: level,
+					text: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '),
+					timestamp: Date.now()
+				});
+				orig[level].apply(console, args);
+			};
+		});
+	}`)
+
+	// Log something
+	page.MustEval(`() => console.log("test message")`)
+
+	// Read from the array
+	result := page.MustEval(`() => window.__rodney_console`)
+	var messages []map[string]interface{}
+	if err := json.Unmarshal([]byte(result.JSON("", "")), &messages); err != nil {
+		t.Fatalf("failed to parse console data: %v", err)
+	}
+
+	if len(messages) == 0 {
+		t.Fatal("expected at least 1 captured console message")
+	}
+	if messages[0]["text"] != "test message" {
+		t.Errorf("expected 'test message', got %q", messages[0]["text"])
+	}
+	if messages[0]["type"] != "log" {
+		t.Errorf("expected type 'log', got %q", messages[0]["type"])
+	}
+}
+
+func TestConsole_RuntimeEvent(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	err := proto.RuntimeEnable{}.Call(page)
+	if err != nil {
+		t.Fatalf("failed to enable runtime: %v", err)
+	}
+
+	var received bool
+	wait := page.EachEvent(func(e *proto.RuntimeConsoleAPICalled) bool {
+		received = true
+		return true // stop after first
+	})
+
+	// Trigger a console.log
+	page.MustEval(`() => console.log("event test")`)
+
+	wait()
+
+	if !received {
+		t.Error("expected to receive RuntimeConsoleAPICalled event")
 	}
 }
