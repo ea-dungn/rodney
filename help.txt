@@ -1,69 +1,110 @@
 rodney - Chrome automation from the command line
 
-Browser lifecycle:
-  rodney start                    Launch headless Chrome
-  rodney stop                     Shut down Chrome
-  rodney status                   Show browser status
+USAGE:
+  rodney <command> [arguments]
 
-Navigation:
-  rodney open <url>               Navigate to URL
-  rodney back                     Go back in history
-  rodney forward                  Go forward in history
-  rodney reload                   Reload current page
+GETTING STARTED:
+  rodney start                    # Launch browser
+  rodney open example.com         # Navigate to a page
+  rodney title                    # Get page title
+  rodney stop                     # Shut down browser
 
-Page info:
-  rodney url                      Print current URL
-  rodney title                    Print page title
-  rodney html [selector]          Print HTML (page or element)
-  rodney text <selector>          Print text content of element
-  rodney attr <selector> <name>   Print attribute value
-  rodney pdf [file]               Save page as PDF
+BROWSER LIFECYCLE:
+  start                           Launch headless Chrome
+  stop                            Shut down Chrome
+  status                          Show browser status and current page
 
-Interaction:
-  rodney js <expression>          Evaluate JavaScript expression
-  rodney click <selector>         Click an element
-  rodney input <selector> <text>  Type text into an input field
-  rodney clear <selector>         Clear an input field
-  rodney file <selector> <path|-> Set file on a file input (- for stdin)
-  rodney download <sel> [file|-]  Download href/src target (- for stdout)
-  rodney select <selector> <val>  Select dropdown option by value
-  rodney submit <selector>        Submit a form
-  rodney hover <selector>         Hover over an element
-  rodney focus <selector>         Focus an element
+NAVIGATION:
+  open <url>                      Navigate to URL (http:// added if missing)
+  back                            Go back in history
+  forward                         Go forward in history
+  reload                          Reload current page
 
-Waiting:
-  rodney wait <selector>          Wait for element to appear
-  rodney waitload                 Wait for page load
-  rodney waitstable               Wait for DOM to stabilize
-  rodney waitidle                 Wait for network idle
-  rodney sleep <seconds>          Sleep for N seconds
+PAGE INFORMATION:
+  url                             Print current URL
+  title                           Print page title
+  html [selector]                 Print HTML (full page or element)
+  text <selector>                 Print text content of element
+  attr <selector> <name>          Print attribute value
+  pdf [file]                      Save page as PDF (default: page.pdf)
 
-Screenshots:
-  rodney screenshot [-w N] [-h N] [file]  Take page screenshot
-  rodney screenshot-el <sel> [f]  Screenshot an element
+INTERACTION:
+  js <expression>                 Evaluate JavaScript expression
+  click <selector>                Click an element
+  input <selector> <text>         Type text into an input field
+  clear <selector>                Clear an input field
+  file <selector> <path|->        Set file on a file input (- for stdin)
+  download <sel> [file|-]         Download href/src target (- for stdout)
+  select <selector> <val>         Select dropdown option by value
+  submit <selector>               Submit a form
+  hover <selector>                Hover over an element
+  focus <selector>                Focus an element
 
-Tabs:
-  rodney pages                    List all pages/tabs
-  rodney page <index>             Switch to page by index
-  rodney newpage [url]            Open a new page/tab
-  rodney closepage [index]        Close a page/tab
+WAITING:
+  wait <selector>                 Wait for element to appear and be visible
+  waitload                        Wait for page load event
+  waitstable                      Wait for DOM to stop changing
+  waitidle                        Wait for network to be idle
+  sleep <seconds>                 Sleep for N seconds
 
-Element queries:
-  rodney exists <selector>        Check if element exists (exit 0/1)
-  rodney count <selector>         Count matching elements
-  rodney visible <selector>       Check if element is visible (exit 0/1)
+SCREENSHOTS:
+  screenshot [-w N] [-h N] [file] Take full page screenshot
+  screenshot-el <sel> [file]      Screenshot a specific element
 
-Accessibility:
-  rodney ax-tree [--depth N] [--json]       Dump accessibility tree
-  rodney ax-find [--name N] [--role R] [--json]  Find accessible nodes
-  rodney ax-node <selector> [--json]        Show accessibility info for element
+TABS:
+  pages                           List all open tabs (* marks active)
+  page <index>                    Switch to tab by index
+  newpage [url]                   Open a new tab
+  closepage [index]               Close a tab (default: active tab)
 
-Network:
-  rodney network list [--json] [--filter <pattern>]  List network requests
-  rodney network filter <pattern>           Filter requests by body content
-  rodney network clear                      Clear network request log
-  rodney network save <file.json>           Save network log to file
+ELEMENT QUERIES:
+  exists <selector>               Check if element exists (exit 0/1)
+  count <selector>                Count matching elements
+  visible <selector>              Check if element is visible (exit 0/1)
 
-Options:
+ACCESSIBILITY TESTING:
+  ax-tree [--depth N] [--json]    Dump accessibility tree
+  ax-find [--name N] [--role R] [--json]
+                                  Find accessible nodes by name/role
+  ax-node <selector> [--json]     Show element's accessibility properties
+
+NETWORK INSPECTION:
+  network list [--json] [--filter <url-pattern>]
+                                  List all network requests with timing info
+  network filter <pattern>        Search response bodies (great for GraphQL!)
+  network clear                   Clear network request log
+  network save <file.json>        Save network log to JSON file
+
+  Examples:
+    rodney network list                    # Show all requests
+    rodney network list --filter "/api/"   # Filter by URL
+    rodney network filter "getUserProfile" # Find GraphQL operations
+    rodney network save network.json       # Export for analysis
+
+OPTIONS:
   --version                       Print version and exit
   --help, -h, help                Show this help message
+
+EXAMPLES:
+  # Basic automation
+  rodney start
+  rodney open https://example.com
+  rodney click "button#submit"
+  rodney waitload
+  rodney screenshot result.png
+  rodney stop
+
+  # Extract data
+  rodney open news.ycombinator.com
+  rodney text ".title" | head -1
+
+  # Debug API calls
+  rodney open https://app.example.com
+  rodney waitidle
+  rodney network list --filter "/graphql"
+
+  # Accessibility check
+  rodney open mysite.com
+  rodney ax-find --role button --json | jq 'length'
+
+For more details: https://github.com/ea-dungn/rodney
