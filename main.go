@@ -269,6 +269,11 @@ func withPage() (*State, *rod.Browser, *rod.Page) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	// Re-inject React hook on every connection — the registration is per-CDP-session
+	// and lost when the previous rodney process exited
+	if s.ReactHook {
+		injectReactHook(page)
+	}
 	// Apply default timeout so element queries don't hang forever
 	page = page.Timeout(defaultTimeout)
 	return s, browser, page
