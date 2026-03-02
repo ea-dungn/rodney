@@ -2754,8 +2754,8 @@ func cmdReactTree(args []string) {
 	json.Unmarshal([]byte(raw), &components)
 
 	for _, c := range components {
-		indent := strings.Repeat("  ", c.depth)
-		line := fmt.Sprintf("%s<%s>", indent, c.name)
+		indent := strings.Repeat("  ", c.Depth)
+		line := fmt.Sprintf("%s<%s>", indent, c.Name)
 		if c.ActualDuration > 0 {
 			line += fmt.Sprintf(" (%.1fms)", c.ActualDuration)
 		}
