@@ -308,10 +308,17 @@ func cmdStart(args []string) {
 	l := launcher.New().
 		Set("no-sandbox").
 		Set("disable-gpu").
-		Set("single-process"). // Required for screenshots in gVisor/container environments
 		Headless(true).
 		Leakless(false). // Keep Chrome alive after CLI exits
 		UserDataDir(dataDir)
+
+	// --single-process merges browser+renderer into one OS process.
+	// Required for screenshots in gVisor/container environments, but
+	// causes crashes on memory-heavy pages (e.g. React dev builds).
+	// Enable with ROD_SINGLE_PROCESS=1 when running inside gVisor.
+	if os.Getenv("ROD_SINGLE_PROCESS") == "1" {
+		l = l.Set("single-process")
+	}
 
 	if bin := os.Getenv("ROD_CHROME_BIN"); bin != "" {
 		l = l.Bin(bin)

@@ -30,9 +30,12 @@ func TestMain(m *testing.M) {
 	l := launcher.New().
 		Set("no-sandbox").
 		Set("disable-gpu").
-		Set("single-process").
 		Headless(true).
 		Leakless(false)
+
+	if os.Getenv("ROD_SINGLE_PROCESS") == "1" {
+		l = l.Set("single-process")
+	}
 
 	if bin := os.Getenv("ROD_CHROME_BIN"); bin != "" {
 		l = l.Bin(bin)
