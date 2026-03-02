@@ -1715,7 +1715,8 @@ func cmdNetworkFilter(args []string) {
 	_, _, page := withPage()
 
 	// Enable network tracking to get request IDs
-	if err := proto.NetworkEnable{}.Call(page); err != nil {
+	err := proto.NetworkEnable{}.Call(page)
+	if err != nil {
 		fatal("failed to enable network tracking: %v", err)
 	}
 
