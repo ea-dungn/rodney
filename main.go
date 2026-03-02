@@ -205,6 +205,8 @@ func main() {
 		cmdAXFind(args)
 	case "ax-node":
 		cmdAXNode(args)
+	case "network":
+		cmdNetwork(args)
 	case "help", "-h", "--help":
 		printUsage()
 		os.Exit(0)
@@ -1564,6 +1566,324 @@ func formatAXNodeDetailJSON(node *proto.AccessibilityAXNode) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+// --- Network tracking commands ---
+
+func cmdNetwork(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rodney network <subcommand>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Subcommands:")
+		fmt.Fprintln(os.Stderr, "  list [--json] [--filter <pattern>]  List network requests")
+		fmt.Fprintln(os.Stderr, "  filter <pattern>                    Filter requests by body content")
+		fmt.Fprintln(os.Stderr, "  clear                               Clear network log")
+		fmt.Fprintln(os.Stderr, "  save <file.json>                    Save network log to file")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "list":
+		cmdNetworkList(subargs)
+	case "filter":
+		cmdNetworkFilter(subargs)
+	case "clear":
+		cmdNetworkClear(subargs)
+	case "save":
+		cmdNetworkSave(subargs)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown network subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func cmdNetworkList(args []string) {
+	jsonOutput := false
+	filterURL := ""
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOutput = true
+		case "--filter":
+			i++
+			if i >= len(args) {
+				fatal("missing value for --filter")
+			}
+			filterURL = args[i]
+		default:
+			fatal("unknown flag: %s\nusage: rodney network-list [--json] [--filter <pattern>]", args[i])
+		}
+	}
+
+	// Use JS to extract network info from the browser's performance API
+	_, _, page := withPage()
+
+	js := `() => {
+		const entries = performance.getEntries()
+			.filter(e => e.entryType === 'resource' || e.entryType === 'navigation')
+			.map(e => ({
+				url: e.name,
+				method: 'GET',
+				type: e.initiatorType || e.entryType,
+				startTime: e.startTime,
+				duration: e.duration,
+				transferSize: e.transferSize,
+				responseStatus: e.responseStatus || 0
+			}));
+		return entries;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get network info: %v", err)
+	}
+
+	var entries []map[string]interface{}
+	if err := json.Unmarshal([]byte(result.Value.JSON("", "")), &entries); err != nil {
+		fatal("failed to parse network data: %v", err)
+	}
+
+	// Filter if needed
+	var filtered []map[string]interface{}
+	for _, entry := range entries {
+		url := entry["url"].(string)
+		if filterURL == "" || strings.Contains(url, filterURL) {
+			filtered = append(filtered, entry)
+		}
+	}
+
+	if len(filtered) == 0 {
+		fmt.Fprintln(os.Stderr, "No network requests found")
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		data, _ := json.MarshalIndent(filtered, "", "  ")
+		fmt.Println(string(data))
+	} else {
+		fmt.Printf("%-10s %-60s %-12s %-10s %s\n", "METHOD", "URL", "TYPE", "SIZE", "DURATION")
+		fmt.Println(strings.Repeat("-", 120))
+		for _, entry := range filtered {
+			method := "GET"
+			if m, ok := entry["method"].(string); ok {
+				method = m
+			}
+
+			url := entry["url"].(string)
+			if len(url) > 60 {
+				url = url[:57] + "..."
+			}
+
+			resourceType := "-"
+			if t, ok := entry["type"].(string); ok {
+				resourceType = t
+			}
+
+			size := "-"
+			if s, ok := entry["transferSize"].(float64); ok && s > 0 {
+				if s < 1024 {
+					size = fmt.Sprintf("%.0fB", s)
+				} else if s < 1024*1024 {
+					size = fmt.Sprintf("%.1fKB", s/1024)
+				} else {
+					size = fmt.Sprintf("%.1fMB", s/1024/1024)
+				}
+			}
+
+			duration := "-"
+			if d, ok := entry["duration"].(float64); ok && d > 0 {
+				duration = fmt.Sprintf("%.0fms", d)
+			}
+
+			fmt.Printf("%-10s %-60s %-12s %-10s %s\n",
+				method, url, resourceType, size, duration)
+		}
+		fmt.Printf("\nTotal requests: %d\n", len(filtered))
+	}
+}
+
+func cmdNetworkFilter(args []string) {
+	if len(args) < 1 {
+		fatal("usage: rodney network filter <pattern>")
+	}
+	pattern := args[0]
+
+	_, _, page := withPage()
+
+	// Enable network tracking to get request IDs
+	if err := proto.NetworkEnable{}.Call(page); err != nil {
+		fatal("failed to enable network tracking: %v", err)
+	}
+
+	// Get all performance entries to find resource requests
+	js := `() => {
+		return performance.getEntries()
+			.filter(e => e.entryType === 'resource' || e.entryType === 'navigation')
+			.map(e => ({
+				url: e.name,
+				type: e.initiatorType || e.entryType
+			}));
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get network info: %v", err)
+	}
+
+	var entries []map[string]interface{}
+	if err := json.Unmarshal([]byte(result.Value.JSON("", "")), &entries); err != nil {
+		fatal("failed to parse network data: %v", err)
+	}
+
+	// Use CDP to intercept and search through network traffic
+	// We'll search through request/response bodies
+	matches := []map[string]interface{}{}
+
+	// Get network requests via CDP - this is a workaround to search bodies
+	// We'll use JS to fetch resources again and search their content
+	for _, entry := range entries {
+		urlStr := entry["url"].(string)
+
+		// Try to fetch and search the response body
+		searchJS := fmt.Sprintf(`async () => {
+			try {
+				const response = await fetch(%q);
+				const text = await response.text();
+				if (text.includes(%q)) {
+					return {
+						url: %q,
+						type: %q,
+						matched: true,
+						contentType: response.headers.get('content-type'),
+						// Extract context around match
+						snippet: text.substring(
+							Math.max(0, text.indexOf(%q) - 100),
+							Math.min(text.length, text.indexOf(%q) + 100)
+						)
+					};
+				}
+				return null;
+			} catch (e) {
+				return null;
+			}
+		}`, urlStr, pattern, urlStr, entry["type"], pattern, pattern)
+
+		matchResult, err := page.Eval(searchJS)
+		if err != nil {
+			continue // Skip errors (CORS, etc.)
+		}
+
+		matchJSON := matchResult.Value.JSON("", "")
+		if matchJSON != "null" {
+			var match map[string]interface{}
+			if err := json.Unmarshal([]byte(matchJSON), &match); err == nil {
+				if match != nil && match["matched"] == true {
+					matches = append(matches, match)
+				}
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		fmt.Fprintf(os.Stderr, "No requests found matching pattern: %s\n", pattern)
+		fmt.Fprintln(os.Stderr, "Note: Only accessible resources can be searched (CORS restrictions apply)")
+		os.Exit(1)
+	}
+
+	// Display matches
+	fmt.Printf("Found %d request(s) matching pattern: %s\n\n", len(matches), pattern)
+	for i, match := range matches {
+		fmt.Printf("[%d] %s\n", i+1, match["url"])
+		if ct, ok := match["contentType"].(string); ok {
+			fmt.Printf("    Content-Type: %s\n", ct)
+		}
+		if snippet, ok := match["snippet"].(string); ok {
+			// Clean up and display snippet
+			snippet = strings.ReplaceAll(snippet, "\n", " ")
+			snippet = strings.ReplaceAll(snippet, "\r", "")
+			if len(snippet) > 200 {
+				snippet = snippet[:197] + "..."
+			}
+			fmt.Printf("    Match: ...%s...\n", snippet)
+		}
+		fmt.Println()
+	}
+}
+
+func cmdNetworkClear(args []string) {
+	_, _, page := withPage()
+
+	// Clear performance entries
+	page.MustEval(`() => { performance.clearResourceTimings(); performance.clearMarks(); performance.clearMeasures(); }`)
+
+	fmt.Println("Network log cleared")
+}
+
+func cmdNetworkSave(args []string) {
+	if len(args) < 1 {
+		fatal("usage: rodney network-save <file.json>")
+	}
+	file := args[0]
+
+	_, _, page := withPage()
+
+	// Get all network entries from Performance API
+	js := `() => {
+		const entries = performance.getEntries()
+			.filter(e => e.entryType === 'resource' || e.entryType === 'navigation')
+			.map(e => ({
+				url: e.name,
+				method: 'GET',
+				type: e.initiatorType || e.entryType,
+				startTime: e.startTime,
+				duration: e.duration,
+				transferSize: e.transferSize,
+				encodedBodySize: e.encodedBodySize,
+				decodedBodySize: e.decodedBodySize,
+				responseStatus: e.responseStatus || 0,
+				protocol: e.nextHopProtocol
+			}));
+		return entries;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get network info: %v", err)
+	}
+
+	var entries []map[string]interface{}
+	if err := json.Unmarshal([]byte(result.Value.JSON("", "")), &entries); err != nil {
+		fatal("failed to parse network data: %v", err)
+	}
+
+	if len(entries) == 0 {
+		fatal("no network requests to save")
+	}
+
+	// Format as HAR-like structure
+	data, err := json.MarshalIndent(map[string]interface{}{
+		"log": map[string]interface{}{
+			"version": "1.2",
+			"creator": map[string]string{
+				"name":    "rodney",
+				"version": version,
+			},
+			"entries": entries,
+		},
+	}, "", "  ")
+	if err != nil {
+		fatal("failed to marshal network log: %v", err)
+	}
+
+	if err := os.WriteFile(file, data, 0644); err != nil {
+		fatal("failed to write file: %v", err)
+	}
+
+	fmt.Printf("Saved %d network requests to %s\n", len(entries), file)
 }
 
 // --- Auth proxy for environments with authenticated HTTP proxies ---

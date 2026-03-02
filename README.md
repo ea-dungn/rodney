@@ -156,6 +156,21 @@ print(f'PASS: all {len(buttons)} buttons have accessible names')
 "
 ```
 
+### Network inspection
+
+```bash
+rodney network list                      # List all network requests
+rodney network list --json               # Output as JSON
+rodney network list --filter "api"       # Filter by URL pattern
+rodney network filter "operationName"    # Filter by response body content (e.g., GraphQL)
+rodney network clear                     # Clear network log
+rodney network save network.json         # Save network log to file
+```
+
+Network commands use the browser's [Performance API](https://developer.mozilla.org/en-US/docs/Web/API/Performance_API) to capture network activity. The log includes URLs, methods, resource types, transfer sizes, and timing information.
+
+The `filter` subcommand searches through response body content, which is particularly useful for debugging GraphQL queries by searching for operation names, field names, or response data.
+
 ### Shell scripting examples
 
 ```bash
@@ -261,3 +276,7 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `ax-tree` | `[--depth N] [--json]` | Dump accessibility tree |
 | `ax-find` | `[--name N] [--role R] [--json]` | Find accessible nodes |
 | `ax-node` | `<selector> [--json]` | Show element accessibility info |
+| `network list` | `[--json] [--filter <pattern>]` | List network requests |
+| `network filter` | `<pattern>` | Filter requests by body content |
+| `network clear` | | Clear network request log |
+| `network save` | `<file.json>` | Save network log to file |

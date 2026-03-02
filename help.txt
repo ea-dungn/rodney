@@ -58,6 +58,12 @@ Accessibility:
   rodney ax-find [--name N] [--role R] [--json]  Find accessible nodes
   rodney ax-node <selector> [--json]        Show accessibility info for element
 
+Network:
+  rodney network list [--json] [--filter <pattern>]  List network requests
+  rodney network filter <pattern>           Filter requests by body content
+  rodney network clear                      Clear network request log
+  rodney network save <file.json>           Save network log to file
+
 Options:
   --version                       Print version and exit
   --help, -h, help                Show this help message
