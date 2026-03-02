@@ -88,6 +88,24 @@ PERFORMANCE:
   perf metrics [--json]           Show runtime performance metrics
   perf vitals [--json]            Show Core Web Vitals (LCP, CLS, TTFB)
   perf timing [--json]            Show navigation timing breakdown
+  perf profile start              Start CPU profiling
+  perf profile stop [file]        Stop and save .cpuprofile (for speedscope)
+  perf trace start                Start full browser trace
+  perf trace stop [file]          Stop and save trace JSON (for Perfetto)
+
+REACT PROFILING:
+  react hook                      Install React DevTools hook (before open!)
+  react tree [--json]             Show React component tree
+  react renders [--json]          Show render commits with per-component timing
+  react flamegraph <file>         Export renders as speedscope flamegraph
+
+  Workflow:
+    rodney react hook                    # Install hook
+    rodney open https://my-react-app.dev # Navigate
+    rodney react tree                    # See component hierarchy
+    rodney react renders                 # See what rendered and how long
+    rodney react flamegraph renders.json # Export flamegraph
+    npx speedscope renders.json          # Visualize
 
 COOKIES:
   cookies list [--json]           List all cookies for current page

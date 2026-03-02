@@ -223,6 +223,8 @@ func main() {
 		cmdCookies(args)
 	case "storage":
 		cmdStorage(args)
+	case "react":
+		cmdReact(args)
 	case "help", "-h", "--help":
 		printUsage()
 		os.Exit(0)
@@ -2163,6 +2165,10 @@ func cmdPerf(args []string) {
 		fmt.Fprintln(os.Stderr, "  metrics [--json]    Show runtime performance metrics")
 		fmt.Fprintln(os.Stderr, "  vitals [--json]     Show Core Web Vitals (LCP, CLS, TTFB)")
 		fmt.Fprintln(os.Stderr, "  timing [--json]     Show navigation timing breakdown")
+		fmt.Fprintln(os.Stderr, "  profile start       Start CPU profiling")
+		fmt.Fprintln(os.Stderr, "  profile stop <file> Stop and save .cpuprofile")
+		fmt.Fprintln(os.Stderr, "  trace start         Start browser trace")
+		fmt.Fprintln(os.Stderr, "  trace stop <file>   Stop and save trace JSON")
 		os.Exit(1)
 	}
 
@@ -2176,6 +2182,10 @@ func cmdPerf(args []string) {
 		cmdPerfVitals(subargs)
 	case "timing":
 		cmdPerfTiming(subargs)
+	case "profile":
+		cmdPerfProfile(subargs)
+	case "trace":
+		cmdPerfTrace(subargs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown perf subcommand: %s\n", subcmd)
 		os.Exit(1)
@@ -2342,6 +2352,614 @@ func cmdPerfTiming(args []string) {
 			fmt.Printf("  %-20s %8.1fms\n", t.label, data.Get(t.key).Num())
 		}
 	}
+}
+
+// --- CPU profiling ---
+
+func profileStatePath() string {
+	return filepath.Join(stateDir(), "profiling.json")
+}
+
+func cmdPerfProfile(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rodney perf profile <start|stop>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  start              Start CPU profiling")
+		fmt.Fprintln(os.Stderr, "  stop <file>        Stop and save .cpuprofile")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "start":
+		cmdPerfProfileStart(args[1:])
+	case "stop":
+		cmdPerfProfileStop(args[1:])
+	default:
+		fatal("unknown profile subcommand: %s", args[0])
+	}
+}
+
+func cmdPerfProfileStart(args []string) {
+	_, _, page := withPage()
+
+	err := proto.ProfilerEnable{}.Call(page)
+	if err != nil {
+		fatal("failed to enable profiler: %v", err)
+	}
+
+	err = proto.ProfilerStart{}.Call(page)
+	if err != nil {
+		fatal("failed to start profiling: %v", err)
+	}
+
+	// Mark that profiling is active
+	os.WriteFile(profileStatePath(), []byte(`{"profiling":true}`), 0644)
+
+	fmt.Println("CPU profiling started")
+	fmt.Println("Run 'rodney perf profile stop <file.cpuprofile>' to save")
+}
+
+func cmdPerfProfileStop(args []string) {
+	file := "profile.cpuprofile"
+	if len(args) > 0 {
+		file = args[0]
+	}
+
+	_, _, page := withPage()
+
+	result, err := proto.ProfilerStop{}.Call(page)
+	if err != nil {
+		fatal("failed to stop profiling: %v", err)
+	}
+
+	data, err := json.MarshalIndent(result.Profile, "", "  ")
+	if err != nil {
+		fatal("failed to marshal profile: %v", err)
+	}
+
+	if err := os.WriteFile(file, data, 0644); err != nil {
+		fatal("failed to write profile: %v", err)
+	}
+
+	os.Remove(profileStatePath())
+
+	fmt.Printf("Saved CPU profile to %s (%d bytes)\n", file, len(data))
+	fmt.Println("Open with: npx speedscope " + file)
+}
+
+// --- Browser tracing ---
+
+func cmdPerfTrace(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rodney perf trace <start|stop>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  start              Start browser trace")
+		fmt.Fprintln(os.Stderr, "  stop <file>        Stop and save trace JSON")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "start":
+		cmdPerfTraceStart(args[1:])
+	case "stop":
+		cmdPerfTraceStop(args[1:])
+	default:
+		fatal("unknown trace subcommand: %s", args[0])
+	}
+}
+
+func cmdPerfTraceStart(args []string) {
+	s, err := loadState()
+	if err != nil {
+		fatal("%v", err)
+	}
+	browser, err := connectBrowser(s)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	// Tracing operates at the browser level, use ReportEvents to get data via events
+	err = proto.TracingStart{
+		Categories:   "-*,devtools.timeline,v8.execute,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.frame,disabled-by-default-v8.cpu_profiler",
+		TransferMode: proto.TracingStartTransferModeReportEvents,
+	}.Call(browser)
+	if err != nil {
+		fatal("failed to start tracing: %v", err)
+	}
+
+	os.WriteFile(filepath.Join(stateDir(), "tracing.json"), []byte(`{"tracing":true}`), 0644)
+
+	fmt.Println("Browser tracing started")
+	fmt.Println("Run 'rodney perf trace stop <file.json>' to save")
+}
+
+func cmdPerfTraceStop(args []string) {
+	file := "trace.json"
+	if len(args) > 0 {
+		file = args[0]
+	}
+
+	s, err := loadState()
+	if err != nil {
+		fatal("%v", err)
+	}
+	browser, err := connectBrowser(s)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	// Collect trace data chunks
+	var chunks []json.RawMessage
+	done := make(chan struct{})
+
+	go browser.EachEvent(
+		func(e *proto.TracingDataCollected) {
+			// Each Value item is a trace event map — marshal it back to JSON
+			for _, item := range e.Value {
+				data, err := json.Marshal(item)
+				if err == nil {
+					chunks = append(chunks, data)
+				}
+			}
+		},
+		func(e *proto.TracingTracingComplete) {
+			close(done)
+		},
+	)()
+
+	// End tracing
+	err = proto.TracingEnd{}.Call(browser)
+	if err != nil {
+		fatal("failed to end tracing: %v", err)
+	}
+
+	// Wait for all data to arrive
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		fatal("timeout waiting for trace data")
+	}
+
+	// Write Chrome Trace Event format
+	f, err := os.Create(file)
+	if err != nil {
+		fatal("failed to create file: %v", err)
+	}
+	defer f.Close()
+
+	f.WriteString("[")
+	for i, chunk := range chunks {
+		if i > 0 {
+			f.WriteString(",")
+		}
+		f.Write(chunk)
+	}
+	f.WriteString("]")
+
+	os.Remove(filepath.Join(stateDir(), "tracing.json"))
+
+	fmt.Printf("Saved browser trace to %s\n", file)
+	fmt.Println("Open with: https://ui.perfetto.dev or Chrome DevTools Performance tab")
+}
+
+// --- React profiling ---
+
+// The JS hook injected before React loads. It intercepts React's
+// renderer registration and captures commit data with component timing.
+const reactHookJS = `
+window.__RODNEY_REACT = {
+	commits: [],
+	renderers: new Map(),
+	fiberRoots: new Set()
+};
+
+window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+	renderers: new Map(),
+	supportsFiber: true,
+	inject: function(renderer) {
+		var id = this.renderers.size + 1;
+		this.renderers.set(id, renderer);
+		window.__RODNEY_REACT.renderers.set(id, renderer);
+		return id;
+	},
+	onCommitFiberRoot: function(rendererID, root, priorityLevel) {
+		window.__RODNEY_REACT.fiberRoots.add(root);
+		var commit = {
+			timestamp: Date.now(),
+			components: []
+		};
+		function walk(fiber, depth) {
+			if (!fiber) return;
+			// tag 0 = FunctionComponent, 1 = ClassComponent, 11 = ForwardRef, 15 = SimpleMemoComponent
+			if (fiber.tag === 0 || fiber.tag === 1 || fiber.tag === 11 || fiber.tag === 15) {
+				var name = 'Anonymous';
+				if (fiber.type) {
+					name = fiber.type.displayName || fiber.type.name || 'Anonymous';
+				}
+				commit.components.push({
+					name: name,
+					depth: depth,
+					actualDuration: fiber.actualDuration || 0,
+					selfBaseDuration: fiber.selfBaseDuration || 0,
+					flags: fiber.flags || 0
+				});
+			}
+			walk(fiber.child, depth + 1);
+			walk(fiber.sibling, depth);
+		}
+		if (root && root.current) {
+			walk(root.current, 0);
+		}
+		if (commit.components.length > 0) {
+			window.__RODNEY_REACT.commits.push(commit);
+		}
+	},
+	onCommitFiberUnmount: function() {},
+	onPostCommitFiberRoot: function() {},
+	isDisabled: false,
+	checkDCE: function() {}
+};
+`
+
+func cmdReact(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rodney react <subcommand>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Subcommands:")
+		fmt.Fprintln(os.Stderr, "  hook                Install React DevTools hook (run BEFORE open)")
+		fmt.Fprintln(os.Stderr, "  tree [--json]       Show component tree")
+		fmt.Fprintln(os.Stderr, "  renders [--json]    Show render commits with timing")
+		fmt.Fprintln(os.Stderr, "  flamegraph <file>   Export renders as speedscope JSON")
+		os.Exit(1)
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "hook":
+		cmdReactHook(subargs)
+	case "tree":
+		cmdReactTree(subargs)
+	case "renders":
+		cmdReactRenders(subargs)
+	case "flamegraph":
+		cmdReactFlamegraph(subargs)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown react subcommand: %s\n", subcmd)
+		os.Exit(1)
+	}
+}
+
+func cmdReactHook(args []string) {
+	_, _, page := withPage()
+
+	// Inject the hook so it runs before any JS on new page loads
+	_, err := proto.PageAddScriptToEvaluateOnNewDocument{Source: reactHookJS}.Call(page)
+	if err != nil {
+		fatal("failed to inject React hook: %v", err)
+	}
+
+	// Also inject into the current page in case React hasn't loaded yet
+	_, evalErr := page.Eval(`() => {
+		if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__) {
+			return 'already installed';
+		}
+		` + reactHookJS + `
+		return 'installed';
+	}`)
+	if evalErr != nil {
+		fatal("failed to eval hook: %v", evalErr)
+	}
+
+	fmt.Println("React DevTools hook installed")
+	fmt.Println("Now run 'rodney open <url>' to navigate to a React app")
+	fmt.Println("Then use 'rodney react renders' or 'rodney react tree' to inspect")
+}
+
+func cmdReactTree(args []string) {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney react tree [--json]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+
+	js := `() => {
+		// Find React fiber root from DOM
+		function findFiberRoot() {
+			// Check for rodney hook data first
+			if (window.__RODNEY_REACT && window.__RODNEY_REACT.fiberRoots.size > 0) {
+				return Array.from(window.__RODNEY_REACT.fiberRoots)[0];
+			}
+			// Fall back to walking DOM to find fiber nodes
+			const rootEl = document.getElementById('root') || document.getElementById('app') ||
+				document.querySelector('[data-reactroot]') ||
+				document.querySelector('#__next') || document.querySelector('#__nuxt');
+			if (!rootEl) return null;
+			const fiberKey = Object.keys(rootEl).find(k =>
+				k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')
+			);
+			if (!fiberKey) return null;
+			// Walk up to find the root
+			let fiber = rootEl[fiberKey];
+			while (fiber.return) fiber = fiber.return;
+			return { current: fiber };
+		}
+
+		const root = findFiberRoot();
+		if (!root || !root.current) return null;
+
+		const tree = [];
+		function walk(fiber, depth) {
+			if (!fiber) return;
+			if (fiber.tag === 0 || fiber.tag === 1 || fiber.tag === 11 || fiber.tag === 15) {
+				let name = 'Anonymous';
+				if (fiber.type) {
+					name = fiber.type.displayName || fiber.type.name || 'Anonymous';
+				}
+				const node = {
+					name: name,
+					depth: depth,
+					actualDuration: fiber.actualDuration || 0,
+					selfBaseDuration: fiber.selfBaseDuration || 0
+				};
+				// Get props keys (not values, to avoid circular refs)
+				if (fiber.memoizedProps && typeof fiber.memoizedProps === 'object') {
+					node.props = Object.keys(fiber.memoizedProps).filter(k => k !== 'children');
+				}
+				// Get state keys for class components
+				if (fiber.memoizedState && typeof fiber.memoizedState === 'object' && !fiber.memoizedState.memoizedState) {
+					node.stateKeys = Object.keys(fiber.memoizedState);
+				}
+				tree.push(node);
+			}
+			walk(fiber.child, depth + 1);
+			walk(fiber.sibling, depth);
+		}
+		walk(root.current, 0);
+		return tree;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get React tree: %v", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	if raw == "null" || raw == "[]" {
+		fmt.Fprintln(os.Stderr, "No React components found")
+		fmt.Fprintln(os.Stderr, "Make sure:")
+		fmt.Fprintln(os.Stderr, "  1. The page uses React")
+		fmt.Fprintln(os.Stderr, "  2. Run 'rodney react hook' before 'rodney open' for best results")
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		fmt.Println(result.Value.JSON("", "  "))
+		return
+	}
+
+	var components []struct {
+		Name             string   `json:"name"`
+		Depth            int      `json:"depth"`
+		ActualDuration   float64  `json:"actualDuration"`
+		SelfBaseDuration float64  `json:"selfBaseDuration"`
+		Props            []string `json:"props"`
+	}
+	json.Unmarshal([]byte(raw), &components)
+
+	for _, c := range components {
+		indent := strings.Repeat("  ", c.depth)
+		line := fmt.Sprintf("%s<%s>", indent, c.name)
+		if c.ActualDuration > 0 {
+			line += fmt.Sprintf(" (%.1fms)", c.ActualDuration)
+		}
+		if len(c.Props) > 0 && len(c.Props) <= 5 {
+			line += fmt.Sprintf(" props=[%s]", strings.Join(c.Props, ", "))
+		} else if len(c.Props) > 5 {
+			line += fmt.Sprintf(" props=[%s, ...+%d]", strings.Join(c.Props[:5], ", "), len(c.Props)-5)
+		}
+		fmt.Println(line)
+	}
+}
+
+func cmdReactRenders(args []string) {
+	jsonOutput := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOutput = true
+		} else {
+			fatal("unknown flag: %s\nusage: rodney react renders [--json]", arg)
+		}
+	}
+
+	_, _, page := withPage()
+
+	js := `() => {
+		if (!window.__RODNEY_REACT || !window.__RODNEY_REACT.commits) return null;
+		return window.__RODNEY_REACT.commits;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get React renders: %v", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	if raw == "null" || raw == "[]" {
+		fmt.Fprintln(os.Stderr, "No React render commits captured")
+		fmt.Fprintln(os.Stderr, "Make sure you ran 'rodney react hook' before 'rodney open <url>'")
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		fmt.Println(result.Value.JSON("", "  "))
+		return
+	}
+
+	var commits []struct {
+		Timestamp  int64 `json:"timestamp"`
+		Components []struct {
+			Name             string  `json:"name"`
+			Depth            int     `json:"depth"`
+			ActualDuration   float64 `json:"actualDuration"`
+			SelfBaseDuration float64 `json:"selfBaseDuration"`
+		} `json:"components"`
+	}
+	json.Unmarshal([]byte(raw), &commits)
+
+	for i, commit := range commits {
+		ts := time.UnixMilli(commit.Timestamp).Format("15:04:05.000")
+		fmt.Printf("Commit #%d [%s] (%d components)\n", i+1, ts, len(commit.Components))
+
+		// Sort by duration desc to show slowest first
+		for _, c := range commit.Components {
+			indent := strings.Repeat("  ", c.Depth+1)
+			if c.ActualDuration > 0 {
+				fmt.Printf("%s%-30s %8.1fms (self: %.1fms)\n",
+					indent, c.Name, c.ActualDuration, c.SelfBaseDuration)
+			} else {
+				fmt.Printf("%s%s\n", indent, c.Name)
+			}
+		}
+		fmt.Println()
+	}
+	fmt.Printf("Total commits: %d\n", len(commits))
+}
+
+func cmdReactFlamegraph(args []string) {
+	if len(args) < 1 {
+		fatal("usage: rodney react flamegraph <file.json>")
+	}
+	file := args[0]
+
+	_, _, page := withPage()
+
+	js := `() => {
+		if (!window.__RODNEY_REACT || !window.__RODNEY_REACT.commits) return null;
+		return window.__RODNEY_REACT.commits;
+	}`
+
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("failed to get React renders: %v", err)
+	}
+
+	raw := result.Value.JSON("", "")
+	if raw == "null" || raw == "[]" {
+		fmt.Fprintln(os.Stderr, "No React render commits captured")
+		fmt.Fprintln(os.Stderr, "Make sure you ran 'rodney react hook' before 'rodney open <url>'")
+		os.Exit(1)
+	}
+
+	var commits []struct {
+		Timestamp  int64 `json:"timestamp"`
+		Components []struct {
+			Name             string  `json:"name"`
+			Depth            int     `json:"depth"`
+			ActualDuration   float64 `json:"actualDuration"`
+			SelfBaseDuration float64 `json:"selfBaseDuration"`
+		} `json:"components"`
+	}
+	json.Unmarshal([]byte(raw), &commits)
+
+	// Build speedscope format
+	// Collect unique frame names
+	frameIndex := map[string]int{}
+	var frames []map[string]string
+
+	getFrame := func(name string) int {
+		if idx, ok := frameIndex[name]; ok {
+			return idx
+		}
+		idx := len(frames)
+		frameIndex[name] = idx
+		frames = append(frames, map[string]string{"name": name})
+		return idx
+	}
+
+	// Build profiles - one per commit
+	var profiles []interface{}
+
+	for i, commit := range commits {
+		// Build evented profile from component tree
+		// Components are walked depth-first, so we can reconstruct the call stack
+		var events []map[string]interface{}
+		var at float64
+
+		// Track open frames via depth stack
+		stack := []int{} // frame indices
+
+		for _, comp := range commit.Components {
+			frameIdx := getFrame(comp.Name)
+			dur := comp.SelfBaseDuration
+			if dur <= 0 {
+				dur = comp.ActualDuration
+			}
+			if dur <= 0 {
+				dur = 0.1 // minimal duration for visibility
+			}
+
+			// Close frames deeper than current depth
+			for len(stack) > comp.Depth {
+				events = append(events, map[string]interface{}{
+					"type": "C", "at": at, "frame": stack[len(stack)-1],
+				})
+				stack = stack[:len(stack)-1]
+			}
+
+			// Open this frame
+			events = append(events, map[string]interface{}{
+				"type": "O", "at": at, "frame": frameIdx,
+			})
+			stack = append(stack, frameIdx)
+			at += dur
+		}
+
+		// Close remaining open frames
+		for len(stack) > 0 {
+			events = append(events, map[string]interface{}{
+				"type": "C", "at": at, "frame": stack[len(stack)-1],
+			})
+			stack = stack[:len(stack)-1]
+		}
+
+		profiles = append(profiles, map[string]interface{}{
+			"type":       "evented",
+			"name":       fmt.Sprintf("Commit #%d", i+1),
+			"unit":       "milliseconds",
+			"startValue": 0,
+			"endValue":   at,
+			"events":     events,
+		})
+	}
+
+	speedscope := map[string]interface{}{
+		"$schema":        "https://www.speedscope.app/file-format-schema.json",
+		"shared":         map[string]interface{}{"frames": frames},
+		"profiles":       profiles,
+		"name":           "React Renders",
+		"activeProfileIndex": 0,
+		"exporter":       "rodney " + version,
+	}
+
+	data, err := json.MarshalIndent(speedscope, "", "  ")
+	if err != nil {
+		fatal("failed to marshal flamegraph: %v", err)
+	}
+
+	if err := os.WriteFile(file, data, 0644); err != nil {
+		fatal("failed to write file: %v", err)
+	}
+
+	fmt.Printf("Saved React flamegraph to %s (%d commits, %d components)\n",
+		file, len(commits), len(frames))
+	fmt.Println("Open with: npx speedscope " + file)
 }
 
 // --- Console command ---

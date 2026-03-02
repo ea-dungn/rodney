@@ -171,6 +171,46 @@ Network commands use the browser's [Performance API](https://developer.mozilla.o
 
 The `filter` subcommand searches through response body content, which is particularly useful for debugging GraphQL queries by searching for operation names, field names, or response data.
 
+### Performance profiling
+
+```bash
+# CPU profiling (outputs .cpuprofile for speedscope)
+rodney perf profile start
+rodney click "#load-data"
+rodney waitidle
+rodney perf profile stop profile.cpuprofile
+npx speedscope profile.cpuprofile       # Visualize
+
+# Full browser trace (outputs trace JSON for Perfetto)
+rodney perf trace start
+rodney open https://example.com
+rodney waitload
+rodney perf trace stop trace.json
+# Open https://ui.perfetto.dev and load trace.json
+```
+
+### React component profiling
+
+```bash
+# 1. Install the DevTools hook BEFORE navigating
+rodney react hook
+
+# 2. Navigate to your React app
+rodney open http://localhost:3000
+
+# 3. Interact with the app
+rodney click "#tab-profile"
+rodney waitstable
+
+# 4. Inspect what rendered
+rodney react tree                        # Component hierarchy
+rodney react renders                     # Per-component render timing
+rodney react flamegraph renders.json     # Export as flamegraph
+npx speedscope renders.json              # Visualize in browser
+```
+
+The React hook intercepts React's internal `onCommitFiberRoot` callback to capture render data. It works with React 16+, in both development and production builds. Component timing (`actualDuration`) is only available in profiling-enabled builds (dev builds, or `react-scripts build --profile`).
+
 ### Shell scripting examples
 
 ```bash
@@ -280,3 +320,11 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `network filter` | `<pattern>` | Filter requests by body content |
 | `network clear` | | Clear network request log |
 | `network save` | `<file.json>` | Save network log to file |
+| `perf profile start` | | Start CPU profiling |
+| `perf profile stop` | `[file]` | Stop and save .cpuprofile |
+| `perf trace start` | | Start browser trace |
+| `perf trace stop` | `[file]` | Stop and save trace JSON |
+| `react hook` | | Install React DevTools hook |
+| `react tree` | `[--json]` | Show component tree |
+| `react renders` | `[--json]` | Show render commits with timing |
+| `react flamegraph` | `<file>` | Export as speedscope flamegraph |
