@@ -51,6 +51,7 @@ rodney open example.com            # http:// prefix added automatically
 rodney back                        # Go back
 rodney forward                     # Go forward
 rodney reload                      # Reload page
+rodney reload --hard               # Reload bypassing cache
 ```
 
 ### Extract information
@@ -83,10 +84,38 @@ The expression is automatically wrapped in `() => { return (expr); }`.
 rodney click "button#submit"       # Click element
 rodney input "#search" "query"     # Type into input field
 rodney clear "#search"             # Clear input field
+rodney file "#upload" photo.jpg    # Set file on a file input
+rodney file "#upload" -            # Set file from stdin
+rodney download "a#link" out.pdf   # Download href/src target
+rodney download "img.hero" -       # Download to stdout
 rodney select "#dropdown" "value"  # Select dropdown by value
 rodney submit "form#login"         # Submit a form
 rodney hover ".menu-item"          # Hover over element
 rodney focus "#email"              # Focus element
+```
+
+### Scroll
+
+```bash
+rodney scroll ".section"           # Scroll element into view
+rodney scroll down                 # Scroll down 300px (default)
+rodney scroll down 500             # Scroll down 500px
+rodney scroll up 200               # Scroll up 200px
+rodney scroll left                 # Scroll left
+rodney scroll right                # Scroll right
+rodney scroll top                  # Scroll to page top
+rodney scroll bottom               # Scroll to page bottom
+```
+
+### Keyboard
+
+```bash
+rodney key Enter                   # Press Enter
+rodney key Tab                     # Press Tab
+rodney key Escape                  # Press Escape
+rodney key ctrl+a                  # Select all
+rodney key shift+Tab               # Shift+Tab
+rodney key "hello world"           # Type text character by character
 ```
 
 ### Wait for conditions
@@ -96,6 +125,8 @@ rodney wait ".loaded"       # Wait for element to appear and be visible
 rodney waitload             # Wait for page load event
 rodney waitstable           # Wait for DOM to stop changing
 rodney waitidle             # Wait for network to be idle
+rodney waitfor 'document.querySelector(".done")'  # Wait until JS expression is truthy
+rodney waitfor --timeout 10 'window.ready'        # Custom timeout (seconds)
 rodney sleep 2.5            # Sleep for N seconds
 ```
 
@@ -104,7 +135,8 @@ rodney sleep 2.5            # Sleep for N seconds
 ```bash
 rodney screenshot                      # Save as screenshot.png
 rodney screenshot page.png             # Save to specific file
-rodney screenshot-el ".chart" chart.png  # Screenshot specific element
+rodney screenshot -w 1280 -h 720 out.png  # Set viewport size
+rodney screenshot-el ".chart" chart.png   # Screenshot specific element
 ```
 
 ### Manage tabs
@@ -156,6 +188,42 @@ print(f'PASS: all {len(buttons)} buttons have accessible names')
 "
 ```
 
+### Console
+
+```bash
+rodney console                     # Read captured console messages
+rodney console --errors            # Show only errors
+rodney console --json              # Output as JSON
+rodney console --follow            # Stream console output (Ctrl+C to stop)
+rodney console --follow --errors   # Stream only errors
+rodney console --clear             # Clear captured messages
+```
+
+### Cookies
+
+```bash
+rodney cookies list                # List all cookies for current page
+rodney cookies list --json         # Output as JSON
+rodney cookies get session_id      # Get a cookie value by name
+rodney cookies set name value      # Set a cookie
+rodney cookies set name value --domain .example.com --secure --httponly
+rodney cookies delete session_id   # Delete a cookie
+rodney cookies clear               # Clear all cookies
+```
+
+### Storage
+
+```bash
+rodney storage list                # List localStorage items
+rodney storage list --json         # Output as JSON
+rodney storage list --session      # List sessionStorage instead
+rodney storage get theme           # Get a localStorage value
+rodney storage set theme dark      # Set a value
+rodney storage delete theme        # Delete a key
+rodney storage clear               # Clear all localStorage
+rodney storage clear --session     # Clear sessionStorage
+```
+
 ### Network inspection
 
 ```bash
@@ -174,6 +242,12 @@ The `filter` subcommand searches through response body content, which is particu
 ### Performance profiling
 
 ```bash
+# Quick metrics
+rodney perf metrics                # Runtime performance metrics
+rodney perf vitals                 # Core Web Vitals (LCP, CLS, TTFB)
+rodney perf timing                 # Navigation timing breakdown
+rodney perf metrics --json         # Any subcommand supports --json
+
 # CPU profiling (outputs .cpuprofile for speedscope)
 rodney perf profile start
 rodney click "#load-data"
@@ -284,7 +358,7 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `open` | `<url>` | Navigate to URL |
 | `back` | | Go back in history |
 | `forward` | | Go forward in history |
-| `reload` | | Reload current page |
+| `reload` | `[--hard]` | Reload current page |
 | `url` | | Print current URL |
 | `title` | | Print page title |
 | `html` | `[selector]` | Print HTML (page or element) |
@@ -295,16 +369,23 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `click` | `<selector>` | Click element |
 | `input` | `<selector> <text>` | Type into input |
 | `clear` | `<selector>` | Clear input |
+| `file` | `<selector> <path\|->` | Set file on file input |
+| `download` | `<selector> [file\|-]` | Download href/src target |
 | `select` | `<selector> <value>` | Select dropdown value |
 | `submit` | `<selector>` | Submit form |
 | `hover` | `<selector>` | Hover over element |
 | `focus` | `<selector>` | Focus element |
+| `scroll` | `<selector>` | Scroll element into view |
+| `scroll` | `up\|down\|left\|right [px]` | Scroll direction |
+| `scroll` | `top\|bottom` | Scroll to page edge |
+| `key` | `<key\|combo\|text>` | Press key, combo, or type text |
 | `wait` | `<selector>` | Wait for element to appear |
 | `waitload` | | Wait for page load |
 | `waitstable` | | Wait for DOM stability |
 | `waitidle` | | Wait for network idle |
+| `waitfor` | `[--timeout N] <js-expr>` | Wait until JS expression is truthy |
 | `sleep` | `<seconds>` | Sleep N seconds |
-| `screenshot` | `[file]` | Page screenshot |
+| `screenshot` | `[-w N] [-h N] [file]` | Page screenshot |
 | `screenshot-el` | `<selector> [file]` | Element screenshot |
 | `pages` | | List tabs |
 | `page` | `<index>` | Switch tab |
@@ -316,10 +397,26 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `ax-tree` | `[--depth N] [--json]` | Dump accessibility tree |
 | `ax-find` | `[--name N] [--role R] [--json]` | Find accessible nodes |
 | `ax-node` | `<selector> [--json]` | Show element accessibility info |
+| `console` | `[--errors] [--json]` | Read console messages |
+| `console` | `--follow [--errors]` | Stream console output |
+| `console` | `--clear` | Clear console messages |
+| `cookies list` | `[--json]` | List cookies |
+| `cookies get` | `<name>` | Get cookie value |
+| `cookies set` | `<name> <value> [flags]` | Set a cookie |
+| `cookies delete` | `<name> [--domain D]` | Delete a cookie |
+| `cookies clear` | | Clear all cookies |
+| `storage list` | `[--session] [--json]` | List storage items |
+| `storage get` | `<key> [--session]` | Get storage value |
+| `storage set` | `<key> <value> [--session]` | Set storage value |
+| `storage delete` | `<key> [--session]` | Delete storage key |
+| `storage clear` | `[--session]` | Clear all storage |
 | `network list` | `[--json] [--filter <pattern>]` | List network requests |
 | `network filter` | `<pattern>` | Filter requests by body content |
 | `network clear` | | Clear network request log |
 | `network save` | `<file.json>` | Save network log to file |
+| `perf metrics` | `[--json]` | Runtime performance metrics |
+| `perf vitals` | `[--json]` | Core Web Vitals |
+| `perf timing` | `[--json]` | Navigation timing breakdown |
 | `perf profile start` | | Start CPU profiling |
 | `perf profile stop` | `[file]` | Stop and save .cpuprofile |
 | `perf trace start` | | Start browser trace |
