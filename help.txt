@@ -147,6 +147,9 @@ ENVIRONMENT VARIABLES:
   ROD_TIMEOUT                     Command timeout in seconds (default: 30)
   ROD_SINGLE_PROCESS              Set to "1" to run Chrome in single-process
                                   mode (needed for gVisor/container environments)
+  ROD_GPU                         Set to "1" to enable GPU acceleration and
+                                  WebGPU (navigator.gpu). Requires hardware GPU
+                                  or a machine with /dev/dri/ for SwiftShader.
 
 EXAMPLES:
   # Basic automation

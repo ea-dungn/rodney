@@ -320,6 +320,17 @@ func cmdStart(args []string) {
 		l = l.Set("single-process")
 	}
 
+	// ROD_GPU=1 enables WebGPU (navigator.gpu) in headless Chrome.
+	// Note: navigator.gpu is only available in secure contexts (https/localhost).
+	if os.Getenv("ROD_GPU") == "1" {
+		l = l.Delete("disable-gpu").
+			Append("enable-features", "Vulkan").
+			Set("use-angle", "vulkan").
+			Set("use-vulkan", "native").
+			Set("disable-vulkan-surface").
+			Set("enable-unsafe-webgpu")
+	}
+
 	if bin := os.Getenv("ROD_CHROME_BIN"); bin != "" {
 		l = l.Bin(bin)
 	}
